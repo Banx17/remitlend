@@ -644,15 +644,6 @@ impl LoanManager {
             .and_then(|value| value.checked_div(10_000))
             .and_then(|value| value.checked_div(term_ledgers))
             .expect("late fee overflow");
-        let late_fee_denominator = 10_000i128
-            .checked_mul(Self::DEFAULT_TERM_LEDGERS as i128)
-            .expect("late fee overflow");
-        let incremental_fee = money::round_div(
-            late_fee_numerator,
-            late_fee_denominator,
-            money::RoundingMode::Floor,
-        )
-        .expect("late fee overflow");
 
         // Global debt cap: Total outstanding (principal + interest + late fees)
         // cannot exceed original_principal * MAX_PENALTY_MULTIPLIER.
@@ -2529,7 +2520,7 @@ impl LoanManager {
             .storage()
             .instance()
             .get(&DataKey::ProposedAdmin)
-            .ok_or(LoanError::NotInitialized)?;
+            .ok_or(LoanError::NoProposedAdmin)?;
         proposed_admin.require_auth();
 
         env.storage()
@@ -2648,7 +2639,7 @@ impl LoanManager {
         Self::require_not_paused(&env)?;
 
         if extra_ledgers == 0 {
-            return Err(LoanError::InvalidTerm);
+            return Err(LoanError::InvalidExtension);
         }
 
         let loan_key = DataKey::Loan(loan_id);
@@ -2681,7 +2672,7 @@ impl LoanManager {
 
         // Check extension limit
         if loan.extension_count >= Self::MAX_EXTENSIONS {
-            return Err(LoanError::InvalidConfiguration);
+            return Err(LoanError::MaxExtensionsReached);
         }
 
         // Calculate extension fee (1% of remaining principal)
