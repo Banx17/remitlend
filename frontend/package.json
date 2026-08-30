@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "scripts": {
     "dev": "next dev",
@@ -11,7 +11,7 @@
     "start": "next start",
     "lint": "prettier --check .",
     "typecheck": "tsc --noEmit",
-    "audit:a11y": "next build && npx axe-playwright",
+    "audit:a11y": "playwright test e2e/accessibility.spec.ts --project=chromium",
     "format": "prettier --write .",
     "test": "jest",
     "test:watch": "jest --watch",

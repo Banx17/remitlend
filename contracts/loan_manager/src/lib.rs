@@ -162,6 +162,7 @@ impl LoanManager {
     const DEFAULT_SCORE_PENALTY_POINTS: u32 = 50;
     const NFT_MAX_SCORE: u32 = 850;
     const DEFAULT_MIN_REPAYMENT_AMOUNT: i128 = 100;
+    const STROOPS_PER_TOKEN: i128 = 10_000_000;
     const MAX_EXTENSIONS: u32 = 3;
     const EXTENSION_FEE_BPS: u32 = 100; // 1% of remaining principal
     /// Default minimum interest rate (configurable via set_rate_bounds). #631
@@ -638,12 +639,19 @@ impl LoanManager {
         } else {
             loan.term_ledgers as i128
         };
-        let incremental_fee = remaining_principal
+        let late_fee_numerator = remaining_principal
             .checked_mul(Self::late_fee_rate_bps(env) as i128)
             .and_then(|value| value.checked_mul(overdue_ledgers as i128))
-            .and_then(|value| value.checked_div(10_000))
-            .and_then(|value| value.checked_div(term_ledgers))
             .expect("late fee overflow");
+        let late_fee_denominator = 10_000i128
+            .checked_mul(Self::DEFAULT_TERM_LEDGERS as i128)
+            .expect("late fee overflow");
+        let incremental_fee = money::round_div(
+            late_fee_numerator,
+            late_fee_denominator,
+            money::RoundingMode::Floor,
+        )
+        .expect("late fee overflow");
 
         // Global debt cap: Total outstanding (principal + interest + late fees)
         // cannot exceed original_principal * MAX_PENALTY_MULTIPLIER.
@@ -1426,7 +1434,7 @@ impl LoanManager {
                     // Use apply_score_delta rather than update_score so score adjustments
                     // work for any token denomination without hitting RemittanceNFT's
                     // anti-dust repayment floor (which assumes XLM stroops).
-                    let points_i128 = amount / 100;
+                    let points_i128 = amount / (100 * Self::STROOPS_PER_TOKEN);
                     let points_i32 = if points_i128 > i32::MAX as i128 {
                         i32::MAX
                     } else if points_i128 <= 0 {

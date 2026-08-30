@@ -838,8 +838,8 @@ fn test_repayment_flow() {
     let completed = manager.get_loan(&loan_id);
     assert_eq!(completed.status, LoanStatus::Repaid);
 
-    // Score updates include both partial and final repayment contributions.
-    assert_eq!(nft_client.get_score(&borrower), 610);
+    // Tiny raw amounts do not cross the whole-token score threshold.
+    assert_eq!(nft_client.get_score(&borrower), 600);
 }
 
 #[test]
@@ -998,6 +998,41 @@ fn test_small_repayment_does_not_change_score() {
     manager.repay(&borrower, &loan_id, &99);
 
     assert_eq!(nft_client.get_score(&borrower), 600);
+}
+
+#[test]
+fn test_stroop_repayment_score_uses_whole_token_scale() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (manager, nft_client, pool_client, token_id, _token_admin) = setup_test(&env);
+    let borrower = Address::generate(&env);
+
+    let history_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    nft_client.mint(
+        &borrower,
+        &600,
+        &history_hash,
+        &String::from_str(&env, "ipfs://QmTest"),
+        &create_test_commitment(&env, 1),
+        &None,
+    );
+
+    let stellar_token = StellarAssetClient::new(&env, &token_id);
+    stellar_token.mint(&pool_client, &2_000_000_000);
+    stellar_token.mint(&borrower, &2_000_000_000);
+    manager.set_max_loan_amount(&1_000_000_000);
+    manager.set_min_repayment_amount(&1);
+
+    let small_loan_id = manager.request_loan(&borrower, &100_000_000, &17280);
+    manager.approve_loan(&small_loan_id);
+    manager.repay(&borrower, &small_loan_id, &100_000_000);
+    assert_eq!(nft_client.get_score(&borrower), 600);
+
+    let threshold_loan_id = manager.request_loan(&borrower, &1_000_000_000, &17280);
+    manager.approve_loan(&threshold_loan_id);
+    manager.repay(&borrower, &threshold_loan_id, &1_000_000_000);
+    assert_eq!(nft_client.get_score(&borrower), 601);
 }
 
 #[test]
