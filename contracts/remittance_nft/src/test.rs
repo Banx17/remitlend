@@ -2482,9 +2482,7 @@ impl MockLoanManager {
 }
 
 // Helper to build the NFT client with a registered mock loan manager.
-fn setup_nft_with_loan_manager<'a>(
-    env: &'a Env,
-) -> (RemittanceNFTClient<'a>, Address, Address, Address) {
+fn setup_nft_with_loan_manager(env: &Env) -> (RemittanceNFTClient<'_>, Address, Address, Address) {
     env.mock_all_auths();
 
     let admin = Address::generate(env);
