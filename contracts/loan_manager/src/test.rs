@@ -4131,4 +4131,3 @@ fn test_liquidate_decreases_score_and_records_default() {
     assert_eq!(nft_client.get_default_count(&borrower), 1);
     assert!(nft_client.is_seized(&borrower));
 }
-
