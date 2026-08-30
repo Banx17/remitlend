@@ -1799,6 +1799,10 @@ impl LoanManager {
         env.storage().persistent().set(&loan_key, &loan);
         Self::bump_persistent_ttl(&env, &loan_key);
 
+        // Decrement the borrower's active loan count so cancelled loans
+        // do not permanently consume loan slots. (#1591)
+        Self::decrement_borrower_loan_count(&env, &loan.borrower);
+
         if collateral_to_release > 0 {
             use soroban_sdk::token::TokenClient;
             let token: Address = env
@@ -1840,6 +1844,10 @@ impl LoanManager {
         loan.collateral_amount = 0;
         env.storage().persistent().set(&loan_key, &loan);
         Self::bump_persistent_ttl(&env, &loan_key);
+
+        // Decrement the borrower's active loan count so rejected loans
+        // do not permanently consume loan slots. (#1591)
+        Self::decrement_borrower_loan_count(&env, &loan.borrower);
 
         if collateral_to_release > 0 {
             use soroban_sdk::token::TokenClient;
@@ -1894,12 +1902,9 @@ impl LoanManager {
         let collateral_key = DataKey::Collateral(loan_id);
         env.storage().persistent().remove(&collateral_key);
 
-        // Cancelled and Rejected loans still hold a borrower loan count
-        // (they are never decremented by cancel_loan / reject_loan), so
-        // clean it up here.
-        if matches!(loan.status, LoanStatus::Cancelled | LoanStatus::Rejected) {
-            Self::decrement_borrower_loan_count(&env, &loan.borrower);
-        }
+        // Note: borrower loan count is already decremented by cancel_loan
+        // and reject_loan themselves (#1591), so no additional decrement is
+        // needed here for Cancelled/Rejected loans.
 
         events::loan_purged(&env, loan_id);
         Ok(())
