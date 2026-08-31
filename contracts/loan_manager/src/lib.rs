@@ -644,7 +644,7 @@ impl LoanManager {
             .and_then(|value| value.checked_mul(overdue_ledgers as i128))
             .expect("late fee overflow");
         let late_fee_denominator = 10_000i128
-            .checked_mul(Self::DEFAULT_TERM_LEDGERS as i128)
+            .checked_mul(term_ledgers)
             .expect("late fee overflow");
         let incremental_fee = money::round_div(
             late_fee_numerator,
