@@ -241,6 +241,12 @@ impl LoanManager {
         }
     }
 
+    // Falls back to the configured default rate (rather than trapping
+    // request_loan/refinance) both when the oracle invocation itself fails -
+    // e.g. the oracle contract reverts, panics, or returns an undecodable
+    // value (#1128) - and when a successfully returned oracle rate is out of
+    // bounds (#631): a compromised or stale oracle cannot grant free loans
+    // (rate=0) or cause instant defaults (extreme rate).
     fn compute_interest_rate(env: &Env, borrower: &Address, amount: i128, score: u32) -> u32 {
         if let Some(oracle_addr) = env
             .storage()
@@ -248,18 +254,19 @@ impl LoanManager {
             .get::<_, Address>(&DataKey::RateOracle)
         {
             let client = RateOracleClient::new(env, &oracle_addr);
-            let oracle_rate = client.get_rate(borrower, &amount, &score);
 
-            // Bounds-check the oracle response (#631): a compromised or stale oracle
-            // cannot grant free loans (rate=0) or cause instant defaults (extreme rate).
-            // Falls back to the configured default rate rather than reverting the tx.
-            let min_rate = Self::min_rate_bps(env);
-            let max_rate = Self::max_rate_bps(env);
+            match client.try_get_rate(borrower, &amount, &score) {
+                Ok(Ok(oracle_rate)) => {
+                    let min_rate = Self::min_rate_bps(env);
+                    let max_rate = Self::max_rate_bps(env);
 
-            if oracle_rate < min_rate || oracle_rate > max_rate {
-                Self::read_interest_rate(env)
-            } else {
-                oracle_rate
+                    if oracle_rate < min_rate || oracle_rate > max_rate {
+                        Self::read_interest_rate(env)
+                    } else {
+                        oracle_rate
+                    }
+                }
+                _ => Self::read_interest_rate(env),
             }
         } else {
             Self::read_interest_rate(env)
@@ -1709,6 +1716,16 @@ impl LoanManager {
         env.storage().persistent().set(&loan_key, &loan);
         Self::bump_persistent_ttl(&env, &loan_key);
         Self::decrement_borrower_loan_count(&env, &loan.borrower);
+
+        let nft_contract = Self::nft_contract(&env);
+        let nft_client = NftClient::new(&env, &nft_contract);
+        nft_client.decrease_score(
+            &loan.borrower,
+            &Self::DEFAULT_SCORE_PENALTY_POINTS,
+            &Some(env.current_contract_address()),
+        );
+        nft_client.record_default(&loan.borrower, &Some(env.current_contract_address()));
+
         let lending_pool: Address = env
             .storage()
             .instance()
@@ -1888,11 +1905,28 @@ impl LoanManager {
         Ok(())
     }
 
-    /// Refinance an active loan in good standing (not past due).
-    /// Settles all accrued interest and late fees, adjusts the principal to
-    /// new_amount (drawing from or returning funds to the pool), and resets
-    /// the due date to current_ledger + new_term.
-    /// Requires both borrower auth and admin auth.
+    /// Refinance an active loan.
+    ///
+    /// Refinancing is allowed for an active loan ([`LoanStatus::Approved`]) until the end of
+    /// its default window (`due_date + default_window`). Settles all accrued interest and
+    /// late fees, adjusts the principal to `new_amount` (drawing from or returning funds to
+    /// the lending pool), re-validates borrower credit score, and resets the due date to
+    /// `current_ledger + new_term`.
+    ///
+    /// # Authorization Requirements
+    /// Requires authorization from both the contract **admin** (`admin.require_auth()`) and the **borrower** (`loan.borrower.require_auth()`).
+    ///
+    /// # Error Conditions
+    /// - [`LoanError::ContractPaused`]: If the loan manager contract is paused.
+    /// - [`LoanError::LoanNotFound`]: If no loan matches `loan_id`.
+    /// - [`LoanError::LoanNotActive`]: If the loan status is not [`LoanStatus::Approved`].
+    /// - [`LoanError::LoanPastDue`]: If the current ledger sequence exceeds the end of the default window (`due_date + default_window`).
+    /// - [`LoanError::InvalidAmount`]: If `new_amount <= 0` or exceeds `max_loan_amount`.
+    /// - [`LoanError::InvalidTerm`]: If `new_term` is outside the configured `[min_term, max_term]` bounds.
+    /// - [`LoanError::NotInitialized`]: If the NFT contract reference is not configured in storage.
+    /// - [`LoanError::InsufficientScore`]: If the borrower's credit score falls below `min_score`.
+    /// - [`LoanError::InsufficientCollateral`]: If recorded collateral is strictly less than `new_amount`.
+    /// - [`LoanError::InsufficientPoolLiquidity`]: When refinancing to a higher principal, if available pool liquidity cannot cover the increase.
     pub fn refinance_loan(
         env: Env,
         loan_id: u32,

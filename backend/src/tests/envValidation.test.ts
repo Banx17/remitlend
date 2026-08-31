@@ -63,4 +63,28 @@ describe('Environment Variable Validation', () => {
     expect(() => validateEnvVars()).toThrow('Process.exit called with 1');
     expect(mockExit).toHaveBeenCalledWith(1);
   });
+
+  it('should exit if neither PII_KEK_KEY nor PII_KMS_ENDPOINT is set', () => {
+    delete process.env.PII_KEK_KEY;
+    delete process.env.PII_KMS_ENDPOINT;
+
+    expect(() => validateEnvVars()).toThrow('Process.exit called with 1');
+    expect(mockExit).toHaveBeenCalledWith(1);
+  });
+
+  it('should not exit if PII_KMS_ENDPOINT is set', () => {
+    process.env.PII_KMS_ENDPOINT = 'https://kms.example.com';
+    delete process.env.PII_KEK_KEY;
+
+    expect(() => validateEnvVars()).not.toThrow();
+    expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  it('should not exit if PII_KEK_KEY is set', () => {
+    process.env.PII_KEK_KEY = 'a'.repeat(64);
+    delete process.env.PII_KMS_ENDPOINT;
+
+    expect(() => validateEnvVars()).not.toThrow();
+    expect(mockExit).not.toHaveBeenCalled();
+  });
 });
