@@ -4170,6 +4170,132 @@ fn test_get_total_outstanding_decreases_on_check_default() {
 }
 
 #[test]
+fn test_get_total_outstanding_returns_to_baseline_after_liquidation() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (manager, nft_client, pool_client, token_id, _token_admin) = setup_test(&env);
+    let borrower = Address::generate(&env);
+    let liquidator = Address::generate(&env);
+
+    let history_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    nft_client.mint(
+        &borrower,
+        &650,
+        &history_hash,
+        &String::from_str(&env, "ipfs://QmTest"),
+        &create_test_commitment(&env, 1),
+        &None,
+    );
+
+    let stellar_token = StellarAssetClient::new(&env, &token_id);
+    stellar_token.mint(&pool_client, &20_000);
+    stellar_token.mint(&borrower, &20_000);
+
+    manager.set_liquidation_threshold(&14_500);
+
+    let baseline = manager.get_total_outstanding(&token_id);
+    assert_eq!(baseline, 0);
+
+    let loan_id = manager.request_loan(&borrower, &1_000, &17_280);
+    manager.approve_loan(&loan_id);
+    assert_eq!(manager.get_total_outstanding(&token_id), baseline + 1_000);
+
+    manager.deposit_collateral(&loan_id, &1_400);
+    manager.liquidate(&liquidator, &loan_id);
+
+    assert_eq!(
+        manager.get_total_outstanding(&token_id),
+        baseline,
+        "liquidation must return TotalOutstanding exactly to its pre-loan baseline"
+    );
+}
+
+#[test]
+fn test_repeated_liquidations_do_not_shrink_available_liquidity() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (manager, nft_client, pool_client, token_id, _token_admin) = setup_test(&env);
+    let borrower_a = Address::generate(&env);
+    let borrower_b = Address::generate(&env);
+    let borrower_c = Address::generate(&env);
+    let liquidator = Address::generate(&env);
+
+    let history_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    nft_client.mint(
+        &borrower_a,
+        &650,
+        &history_hash,
+        &String::from_str(&env, "ipfs://QmTestA"),
+        &create_test_commitment(&env, 1),
+        &None,
+    );
+    nft_client.mint(
+        &borrower_b,
+        &650,
+        &history_hash,
+        &String::from_str(&env, "ipfs://QmTestB"),
+        &create_test_commitment(&env, 2),
+        &None,
+    );
+    nft_client.mint(
+        &borrower_c,
+        &650,
+        &history_hash,
+        &String::from_str(&env, "ipfs://QmTestC"),
+        &create_test_commitment(&env, 3),
+        &None,
+    );
+
+    let stellar_token = StellarAssetClient::new(&env, &token_id);
+    stellar_token.mint(&pool_client, &20_000);
+    stellar_token.mint(&borrower_a, &20_000);
+    stellar_token.mint(&borrower_b, &20_000);
+    stellar_token.mint(&borrower_c, &20_000);
+
+    manager.set_liquidation_threshold(&14_500);
+
+    let baseline = manager.get_total_outstanding(&token_id);
+    assert_eq!(baseline, 0);
+
+    // Approve + liquidate loan A: outstanding must return to baseline (not stay
+    // inflated), otherwise liquidity is permanently starved.
+    let loan_a = manager.request_loan(&borrower_a, &1_000, &17_280);
+    manager.approve_loan(&loan_a);
+    manager.deposit_collateral(&loan_a, &1_400);
+    manager.liquidate(&liquidator, &loan_a);
+    assert_eq!(
+        manager.get_total_outstanding(&token_id),
+        baseline,
+        "TotalOutstanding must return to baseline after the first liquidation"
+    );
+
+    // Approve + liquidate loan B: the bug compounded across multiple loans, so
+    // verify the second liquidation also returns outstanding to baseline.
+    let loan_b = manager.request_loan(&borrower_b, &1_000, &17_280);
+    manager.approve_loan(&loan_b);
+    manager.deposit_collateral(&loan_b, &1_400);
+    manager.liquidate(&liquidator, &loan_b);
+    assert_eq!(
+        manager.get_total_outstanding(&token_id),
+        baseline,
+        "repeated liquidations must not compound TotalOutstanding inflation"
+    );
+
+    // Because outstanding is genuinely back to baseline, available_liquidity is
+    // the full pool balance: a subsequent approve_loan must still succeed. (A
+    // and B are marked seized by their liquidations, so use a fresh borrower
+    // for loan C.)
+    let loan_c = manager.request_loan(&borrower_c, &1_000, &17_280);
+    assert_eq!(
+        manager.try_approve_loan(&loan_c),
+        Ok(Ok(())),
+        "a later approve_loan must not see starved available_liquidity"
+    );
+}
+
+#[test]
 fn test_is_liquidatable_healthy_loan() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
