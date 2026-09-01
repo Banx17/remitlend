@@ -470,6 +470,120 @@ fn test_reject_pending_loan() {
 }
 
 #[test]
+fn test_cancel_decrements_borrower_loan_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (manager, nft_client, _pool, _token, _token_admin) = setup_test(&env);
+    let borrower = Address::generate(&env);
+
+    let history_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    nft_client.mint(
+        &borrower,
+        &600,
+        &history_hash,
+        &String::from_str(&env, "ipfs://QmTest"),
+        &create_test_commitment(&env, 1),
+        &None,
+    );
+
+    assert_eq!(manager.get_borrower_loan_count(&borrower), 0);
+
+    let loan_id = manager.request_loan(&borrower, &1_000, &17280);
+    assert_eq!(manager.get_borrower_loan_count(&borrower), 1);
+
+    manager.cancel_loan(&borrower, &loan_id);
+    assert_eq!(manager.get_borrower_loan_count(&borrower), 0);
+}
+
+#[test]
+fn test_reject_decrements_borrower_loan_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (manager, nft_client, _pool, _token, _token_admin) = setup_test(&env);
+    let borrower = Address::generate(&env);
+
+    let history_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    nft_client.mint(
+        &borrower,
+        &600,
+        &history_hash,
+        &String::from_str(&env, "ipfs://QmTest"),
+        &create_test_commitment(&env, 1),
+        &None,
+    );
+
+    assert_eq!(manager.get_borrower_loan_count(&borrower), 0);
+
+    let loan_id = manager.request_loan(&borrower, &1_000, &17280);
+    assert_eq!(manager.get_borrower_loan_count(&borrower), 1);
+
+    manager.reject_loan(&loan_id, &String::from_str(&env, "manual review failed"));
+    assert_eq!(manager.get_borrower_loan_count(&borrower), 0);
+}
+
+#[test]
+fn test_cancel_then_request_new_loan_succeeds() {
+    // Verifies the core issue: after cancelling a loan, the borrower can
+    // request a new one without hitting MaxLoansReached. (#1591)
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (manager, nft_client, _pool, _token, _token_admin) = setup_test(&env);
+    let borrower = Address::generate(&env);
+
+    let history_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    nft_client.mint(
+        &borrower,
+        &600,
+        &history_hash,
+        &String::from_str(&env, "ipfs://QmTest"),
+        &create_test_commitment(&env, 1),
+        &None,
+    );
+
+    let loan_id = manager.request_loan(&borrower, &1_000, &17280);
+    manager.cancel_loan(&borrower, &loan_id);
+
+    // Borrower should be able to request a new loan after cancellation
+    let loan_id_2 = manager.request_loan(&borrower, &1_000, &17280);
+    let loan_2 = manager.get_loan(&loan_id_2);
+    assert_eq!(loan_2.status, LoanStatus::Pending);
+    assert_eq!(manager.get_borrower_loan_count(&borrower), 1);
+}
+
+#[test]
+fn test_reject_then_request_new_loan_succeeds() {
+    // Verifies the core issue: after a loan is rejected, the borrower can
+    // request a new one without hitting MaxLoansReached. (#1591)
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (manager, nft_client, _pool, _token, _token_admin) = setup_test(&env);
+    let borrower = Address::generate(&env);
+
+    let history_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    nft_client.mint(
+        &borrower,
+        &600,
+        &history_hash,
+        &String::from_str(&env, "ipfs://QmTest"),
+        &create_test_commitment(&env, 1),
+        &None,
+    );
+
+    let loan_id = manager.request_loan(&borrower, &1_000, &17280);
+    manager.reject_loan(&loan_id, &String::from_str(&env, "manual review failed"));
+
+    // Borrower should be able to request a new loan after rejection
+    let loan_id_2 = manager.request_loan(&borrower, &1_000, &17280);
+    let loan_2 = manager.get_loan(&loan_id_2);
+    assert_eq!(loan_2.status, LoanStatus::Pending);
+    assert_eq!(manager.get_borrower_loan_count(&borrower), 1);
+}
+
+#[test]
 fn test_paused_blocks_new_loans_and_repayments_but_allows_collateral_release() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -4068,7 +4182,7 @@ fn test_purge_emits_loan_purged_event() {
 }
 
 #[test]
-fn test_purge_cancelled_loan_decrements_borrower_loan_count() {
+fn test_purge_cancelled_loan_does_not_double_decrement() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
 
@@ -4086,11 +4200,15 @@ fn test_purge_cancelled_loan_decrements_borrower_loan_count() {
     );
 
     let loan_id = manager.request_loan(&borrower, &1_000, &17280);
-    manager.cancel_loan(&borrower, &loan_id);
-    manager.purge_loan(&loan_id);
+    assert_eq!(manager.get_borrower_loan_count(&borrower), 1);
 
-    // Borrower loan count should have been decremented
-    // (no direct getter for borrower_loan_count, but we can verify no panic)
+    manager.cancel_loan(&borrower, &loan_id);
+    // cancel_loan decrements the count (#1591)
+    assert_eq!(manager.get_borrower_loan_count(&borrower), 0);
+
+    manager.purge_loan(&loan_id);
+    // purge should NOT double-decrement
+    assert_eq!(manager.get_borrower_loan_count(&borrower), 0);
 }
 
 // ── get_total_outstanding tests ────────────────────────────────────────────
