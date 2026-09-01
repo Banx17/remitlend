@@ -55,7 +55,11 @@ export function getScoreBandMax(score: number, maxContractAmount?: number): numb
     return 0;
   }
 
-  if (typeof maxContractAmount === "number" && Number.isFinite(maxContractAmount) && maxContractAmount > 0) {
+  if (
+    typeof maxContractAmount === "number" &&
+    Number.isFinite(maxContractAmount) &&
+    maxContractAmount > 0
+  ) {
     return Math.min(tierLimit, maxContractAmount);
   }
 
