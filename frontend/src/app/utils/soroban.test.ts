@@ -22,8 +22,9 @@ const {
   getNetworkPassphrase,
 } = require("./soroban");
 
-const NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
-const PUBLIC_NETWORK_PASSPHRASE = "Public Global Stellar Network ; October 2015";
+import { NETWORK_PASSPHRASES } from "./networkPassphrase";
+
+const NETWORK_PASSPHRASE = NETWORK_PASSPHRASES.TESTNET;
 
 describe("buildUnsignedLoanRequestXdr", () => {
   const borrower = Keypair.random().publicKey();
