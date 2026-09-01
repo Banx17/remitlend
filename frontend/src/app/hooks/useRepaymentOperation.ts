@@ -49,12 +49,15 @@ export function useRepaymentOperation(options?: {
   onSuccess?: (result: RepaymentOperationResult) => void;
   onError?: (error: Error) => void;
 }) {
+  const queryClient = useQueryClient();
   const uid = useId();
   const transactionId = `repayment-${uid}`;
   const transaction = useTransaction(transactionId);
   const [error, setError] = useState<string | null>(null);
   const repayLoan = useRepayLoan();
+  const queryClient = useQueryClient();
   const { signTransaction } = useWallet();
+  const queryClient = useQueryClient();
   const isExecuting = useRef(false);
 
   const executeRepayment = useCallback(
@@ -94,8 +97,12 @@ export function useRepaymentOperation(options?: {
 
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: queryKeys.loans.detail(String(loanId)) }),
-          queryClient.invalidateQueries({ queryKey: queryKeys.borrowerLoans.byAddress(borrowerAddress) }),
-          queryClient.invalidateQueries({ queryKey: queryKeys.loans.borrowerPagePrefix(borrowerAddress) }),
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.borrowerLoans.byAddress(borrowerAddress),
+          }),
+          queryClient.invalidateQueries({
+            queryKey: queryKeys.loans.borrowerPagePrefix(borrowerAddress),
+          }),
           queryClient.invalidateQueries({ queryKey: queryKeys.pool.stats() }),
         ]);
 

@@ -1668,14 +1668,15 @@ fn test_adjust_outstanding_zero_delta_is_a_no_op() {
     assert_eq!(pool_client.get_total_outstanding(&token), 1_000);
 }
 
-// ── #1380: slippage bounds & virtual-share/asset offset ───────────────────────
+// ── #1089 / #1380: donation-attack & slippage bounds ────────────────────────
 //
-// These tests reproduce the single-ledger share-price manipulation described
-// in #1380 and assert it is now prevented: a bare token transfer to the
-// pool's address ("donation") cannot move the share price, the classic
-// first-depositor inflation attack is defused by the virtual offset, and
-// `min_shares_out`/`min_assets_out` cause settlement to revert rather than
-// execute at a worse price than the caller expected.
+// These tests reproduce the first-depositor share inflation attack (#1089)
+// and single-ledger share-price manipulation (#1380), asserting they are
+// prevented: a bare token transfer to the pool's address ("donation")
+// cannot move the share price, the classic first-depositor inflation
+// attack is defused by the virtual offset, and `min_shares_out` /
+// `min_assets_out` cause settlement to revert rather than execute at a
+// worse price than the caller expected.
 
 #[test]
 fn test_donation_to_pool_address_does_not_move_share_price() {
