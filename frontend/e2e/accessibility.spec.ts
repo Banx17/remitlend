@@ -13,10 +13,8 @@ test.describe("Accessibility audit", () => {
       },
     });
 
-    const critical = violations.filter(
-      (v) => v.impact === "critical" || v.impact === "serious",
-    );
     const critical = violations.filter((v) => v.impact === "critical" || v.impact === "serious");
+
     expect(critical, `Found ${critical.length} critical/serious a11y violations`).toEqual([]);
   });
 });
