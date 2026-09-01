@@ -365,6 +365,9 @@ impl RemittanceNFT {
         env.storage()
             .persistent()
             .remove(&DataKey::RecipientCommitment(user.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DefaultCount(user.clone()));
 
         let burned_key = DataKey::Burned(user.clone());
         env.storage().persistent().set(&burned_key, &true);
@@ -629,6 +632,9 @@ impl RemittanceNFT {
         env.storage()
             .persistent()
             .remove(&DataKey::TransferCooldown(user.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DefaultCount(user.clone()));
 
         // Write the new NFT metadata.
         let metadata = RemittanceMetadata {

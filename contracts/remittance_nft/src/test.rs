@@ -946,10 +946,63 @@ fn test_record_default_auto_burns_after_threshold() {
     assert!(client.get_metadata(&user).is_some());
 
     client.record_default(&user, &None);
-    assert_eq!(client.get_default_count(&user), 2);
+    assert_eq!(client.get_default_count(&user), 0);
     assert!(client.get_metadata(&user).is_none());
     assert_eq!(client.get_score(&user), 0);
     assert!(!client.is_seized(&user));
+}
+
+#[test]
+fn test_reminted_account_resets_default_count_and_does_not_immediately_reburn() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    let contract_id = env.register(RemittanceNFT, ());
+    let client = RemittanceNFTClient::new(&env, &contract_id);
+
+    client.initialize(&admin);
+    client.set_default_burn_threshold(&2);
+    client.mint(
+        &user,
+        &500,
+        &create_test_hash(&env, 6),
+        &create_test_uri(&env),
+        &create_test_commitment(&env, 1),
+        &None,
+    );
+
+    // Default user twice to auto-burn (threshold=2)
+    client.record_default(&user, &None);
+    client.record_default(&user, &None);
+    assert!(client.get_metadata(&user).is_none());
+    assert_eq!(client.get_default_count(&user), 0);
+
+    // Approve and remint
+    client.approve_remint(&user);
+    client.admin_remint(
+        &user,
+        &600,
+        &create_test_hash(&env, 7),
+        &create_test_uri(&env),
+        &create_test_commitment(&env, 2),
+    );
+
+    // Default count must be reset to 0
+    assert_eq!(client.get_default_count(&user), 0);
+    assert!(client.get_metadata(&user).is_some());
+
+    // Single record_default after remint increments count to 1 and does not re-burn
+    client.record_default(&user, &None);
+    assert_eq!(client.get_default_count(&user), 1);
+    assert!(client.get_metadata(&user).is_some());
+
+    // Second record_default hits threshold 2 and auto-burns again
+    client.record_default(&user, &None);
+    assert_eq!(client.get_default_count(&user), 0);
+    assert!(client.get_metadata(&user).is_none());
 }
 
 #[test]
