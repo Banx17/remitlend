@@ -2599,7 +2599,7 @@ impl LoanManager {
             .storage()
             .instance()
             .get(&DataKey::ProposedAdmin)
-            .ok_or(LoanError::NotInitialized)?;
+            .ok_or(LoanError::NoProposedAdmin)?;
         proposed_admin.require_auth();
 
         env.storage()
@@ -2718,7 +2718,7 @@ impl LoanManager {
         Self::require_not_paused(&env)?;
 
         if extra_ledgers == 0 {
-            return Err(LoanError::InvalidTerm);
+            return Err(LoanError::InvalidExtension);
         }
 
         let loan_key = DataKey::Loan(loan_id);
@@ -2751,7 +2751,7 @@ impl LoanManager {
 
         // Check extension limit
         if loan.extension_count >= Self::MAX_EXTENSIONS {
-            return Err(LoanError::InvalidConfiguration);
+            return Err(LoanError::MaxExtensionsReached);
         }
 
         // Calculate extension fee (1% of remaining principal)
