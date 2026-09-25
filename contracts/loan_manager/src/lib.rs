@@ -170,6 +170,11 @@ impl LoanManager {
     /// Default maximum interest rate (configurable via set_rate_bounds). #631
     const MAX_RATE_BPS: u32 = 100_000; // Maximum 1000% interest rate
     const MAX_PENALTY_MULTIPLIER: i128 = 2; // Total debt cannot exceed 2x original principal
+    /// Maximum unpaid remainder (in stroops) eligible for rounding-dust
+    /// forgiveness in `repay` (#1770). Dust forgiveness only covers a tiny
+    /// shortfall between `amount` and `total_debt` caused by rounding — never
+    /// the whole remaining debt.
+    const ROUNDING_DUST_THRESHOLD: i128 = 1;
 
     fn bump_instance_ttl(env: &Env) {
         env.storage()
@@ -1162,18 +1167,25 @@ impl LoanManager {
         Self::bump_instance_ttl(&env);
         Self::bump_persistent_ttl(&env, &DataKey::Loan(loan_counter));
 
-        // Add loan ID to borrower's loan list
+        // Add loan ID to borrower's loan list (persistent storage with TTL
+        // bumping — #1772: instance storage is capped at 64KB for the whole
+        // contract, so per-borrower vectors must not live there).
         let borrower_loans_key = DataKey::BorrowerLoans(borrower.clone());
         let mut borrower_loans: Vec<u32> = env
             .storage()
-            .instance()
+            .persistent()
             .get(&borrower_loans_key)
+            .or_else(|| {
+                // Backwards-compat migration read for loans recorded under the
+                // legacy instance-storage layout.
+                env.storage().instance().get(&borrower_loans_key)
+            })
             .unwrap_or(Vec::new(&env));
         borrower_loans.push_back(loan_counter);
         env.storage()
-            .instance()
+            .persistent()
             .set(&borrower_loans_key, &borrower_loans);
-        Self::bump_instance_ttl(&env);
+        Self::bump_persistent_ttl(&env, &borrower_loans_key);
 
         events::loan_requested(&env, loan_counter, borrower.clone(), amount);
         Ok(loan_counter)
@@ -1330,9 +1342,9 @@ impl LoanManager {
     /// Requires `borrower` authorization and the loan manager, lending pool,
     /// and NFT contract to be unpaused. The loan must be [`LoanStatus::Approved`]
     /// and owned by `borrower`. The repayment is split proportionally across
-    /// principal, accrued interest, and accrued late fees; if the remaining debt
-    /// is at or below the configured minimum repayment amount, the final payment
-    /// may forgive rounding dust and mark the loan [`LoanStatus::Repaid`].
+    /// principal, accrued interest, and accrued late fees; if the payment falls
+    /// short of the total debt by at most a tiny rounding-dust threshold, the
+    /// dust may be forgiven and the loan marked [`LoanStatus::Repaid`].
     ///
     /// Returns [`LoanError::ContractPaused`], [`LoanError::PoolPaused`], or
     /// [`LoanError::NftPaused`] when pause checks fail; [`LoanError::InvalidAmount`]
@@ -1386,9 +1398,15 @@ impl LoanManager {
 
         let min_repayment_amount = Self::min_repayment_amount(&env);
 
-        // Allow below-minimum repayment only when it fully clears the remaining debt
-        // or when the remaining debt itself is just small rounding dust.
-        let is_rounding_dust_forgiveness = total_debt <= min_repayment_amount;
+        // Allow below-minimum repayment only when it fully clears the remaining debt.
+        // Rounding-dust forgiveness (#1770) covers only a tiny unpaid remainder
+        // (total_debt - amount <= ROUNDING_DUST_THRESHOLD) caused by rounding —
+        // never the whole remaining debt. Checking `total_debt <=
+        // min_repayment_amount` instead allowed wiping out the entire debt
+        // with a 1-stroop payment.
+        let shortfall = total_debt.checked_sub(amount).unwrap_or(0);
+        let is_rounding_dust_forgiveness =
+            amount < total_debt && shortfall <= Self::ROUNDING_DUST_THRESHOLD;
 
         if amount < total_debt && amount < min_repayment_amount && !is_rounding_dust_forgiveness {
             panic!("repayment amount below minimum");
@@ -1966,11 +1984,14 @@ impl LoanManager {
 
         // Remove the purged loan id from the borrower's loan list so that
         // get_borrower_loans no longer returns a dangling id.
+        // (#1772: the list lives in persistent storage; also sweep any legacy
+        // instance-storage copy.)
         let borrower_loans_key = DataKey::BorrowerLoans(loan.borrower.clone());
         if let Some(existing) = env
             .storage()
-            .instance()
+            .persistent()
             .get::<_, Vec<u32>>(&borrower_loans_key)
+            .or_else(|| env.storage().instance().get(&borrower_loans_key))
         {
             let mut updated: Vec<u32> = Vec::new(&env);
             for id in existing.iter() {
@@ -1979,10 +2000,15 @@ impl LoanManager {
                 }
             }
             if updated.is_empty() {
-                env.storage().instance().remove(&borrower_loans_key);
+                env.storage().persistent().remove(&borrower_loans_key);
             } else {
-                env.storage().instance().set(&borrower_loans_key, &updated);
+                env.storage()
+                    .persistent()
+                    .set(&borrower_loans_key, &updated);
+                Self::bump_persistent_ttl(&env, &borrower_loans_key);
             }
+            // Drop any stale legacy copy in instance storage.
+            env.storage().instance().remove(&borrower_loans_key);
         }
 
         // Note: borrower loan count is already decremented by cancel_loan
@@ -2444,10 +2470,17 @@ impl LoanManager {
     }
 
     pub fn get_borrower_loans(env: Env, borrower: Address) -> Vec<u32> {
+        let key = DataKey::BorrowerLoans(borrower);
+        if let Some(loans) = env.storage().persistent().get::<_, Vec<u32>>(&key) {
+            Self::bump_persistent_ttl(&env, &key);
+            return loans;
+        }
+        // Backwards-compat fallback for loans recorded under the legacy
+        // instance-storage layout (#1772).
         Self::bump_instance_ttl(&env);
         env.storage()
             .instance()
-            .get(&DataKey::BorrowerLoans(borrower))
+            .get(&key)
             .unwrap_or(Vec::new(&env))
     }
 
