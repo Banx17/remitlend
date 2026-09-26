@@ -1977,6 +1977,38 @@ fn test_deposit_collateral_moves_funds_from_borrower_to_contract() {
 }
 
 #[test]
+fn test_deposit_collateral_failed_transfer_rolls_back_collateral() {
+    // #1775: collateral is persisted before the token transfer (CEI). A
+    // failing transfer must roll back that write.
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (manager, nft_client, pool_client, token_id, _token_admin) = setup_test(&env);
+    let borrower = Address::generate(&env);
+
+    let history_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    nft_client.mint(
+        &borrower,
+        &650,
+        &history_hash,
+        &String::from_str(&env, "ipfs://QmTest"),
+        &create_test_commitment(&env, 1),
+        &None,
+    );
+
+    StellarAssetClient::new(&env, &token_id).mint(&pool_client, &20_000);
+
+    let loan_id = manager.request_loan(&borrower, &1_000, &17280);
+    manager.approve_loan(&loan_id);
+
+    let balance = TokenClient::new(&env, &token_id).balance(&borrower);
+    assert!(manager
+        .try_deposit_collateral(&loan_id, &(balance + 1))
+        .is_err());
+    assert_eq!(manager.get_collateral(&loan_id), 0);
+}
+
+#[test]
 fn test_deposit_collateral_and_auto_release_on_full_repayment() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
