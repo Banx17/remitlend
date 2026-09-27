@@ -1569,7 +1569,7 @@ impl LoanManager {
         }
 
         let loan_key = DataKey::Loan(loan_id);
-        let loan: Loan = env
+        let mut loan: Loan = env
             .storage()
             .persistent()
             .get(&loan_key)
@@ -1597,16 +1597,9 @@ impl LoanManager {
             .instance()
             .get(&DataKey::Token)
             .expect("token not set");
-        let token_client = TokenClient::new(&env, &token);
-        token_client.transfer(&loan.borrower, &env.current_contract_address(), &amount);
 
-        let loan_key = DataKey::Loan(loan_id);
-        let mut loan: Loan = env
-            .storage()
-            .persistent()
-            .get(&loan_key)
-            .expect("loan not found");
-
+        // Effects before interactions (CEI): persist collateral before the
+        // external token call. A failed transfer rolls back the whole tx.
         let updated_collateral = loan
             .collateral_amount
             .checked_add(amount)
@@ -1614,6 +1607,12 @@ impl LoanManager {
         loan.collateral_amount = updated_collateral;
         env.storage().persistent().set(&loan_key, &loan);
         Self::bump_persistent_ttl(&env, &loan_key);
+
+        TokenClient::new(&env, &token).transfer(
+            &loan.borrower,
+            &env.current_contract_address(),
+            &amount,
+        );
 
         events::collateral_deposited(&env, loan.borrower.clone(), loan_id, updated_collateral);
 
