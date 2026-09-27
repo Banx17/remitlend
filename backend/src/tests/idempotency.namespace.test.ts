@@ -173,11 +173,7 @@ describe('idempotencyMiddleware key namespacing (#1809)', () => {
 
       jest.clearAllMocks();
       asMock(cacheService.setNotExists).mockResolvedValue(true);
-      await idempotencyMiddleware(
-        buildRequest(undefined) as Request,
-        res as Response,
-        next,
-      );
+      await idempotencyMiddleware(buildRequest(undefined) as Request, res as Response, next);
 
       expect(cacheKeysRead()[0]).toBe(first);
       expect(first).toContain('anon');
