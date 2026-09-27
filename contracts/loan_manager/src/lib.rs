@@ -1446,6 +1446,9 @@ impl LoanManager {
             .principal_paid
             .checked_add(principal_payment)
             .expect("principal paid overflow");
+        // Total outstanding tracks remaining principal, so every principal
+        // payment reduces it immediately (#1771).
+        Self::adjust_total_outstanding(&env, &token, -principal_payment);
 
         let was_late = env.ledger().sequence()
             > loan
@@ -1454,6 +1457,7 @@ impl LoanManager {
                 .expect("grace period overflow");
 
         let mut completed = false;
+        let unpaid_principal = Self::remaining_principal(&loan);
 
         let is_fully_repaid = loan.principal_paid == loan.amount
             && loan.accrued_interest == 0
@@ -1476,7 +1480,8 @@ impl LoanManager {
             // CEI: mark the loan as Repaid in state before any cross-contract call (#630).
             // A reentrant repay() on the same loan_id will now hit LoanNotActive and
             // revert, preventing double withdrawal of collateral.
-            Self::adjust_total_outstanding(&env, &token, -loan.amount);
+            // Only principal forgiven as rounding dust is still counted here.
+            Self::adjust_total_outstanding(&env, &token, -unpaid_principal);
             loan.status = LoanStatus::Repaid;
             Self::decrement_borrower_loan_count(&env, &loan.borrower);
         }
@@ -1781,6 +1786,7 @@ impl LoanManager {
             (collateral_amount, 0, 0)
         };
 
+        let unpaid_principal = Self::remaining_principal(&loan);
         Self::apply_debt_recovery(&mut loan, debt_repaid);
         loan.status = LoanStatus::Liquidated;
         loan.collateral_amount = 0;
@@ -1790,7 +1796,7 @@ impl LoanManager {
             .instance()
             .get(&DataKey::Token)
             .expect("token not set");
-        Self::adjust_total_outstanding(&env, &token, -loan.amount);
+        Self::adjust_total_outstanding(&env, &token, -unpaid_principal);
 
         env.storage().persistent().set(&loan_key, &loan);
         Self::bump_persistent_ttl(&env, &loan_key);
@@ -2489,10 +2495,7 @@ impl LoanManager {
         // Backwards-compat fallback for loans recorded under the legacy
         // instance-storage layout (#1772).
         Self::bump_instance_ttl(&env);
-        env.storage()
-            .instance()
-            .get(&key)
-            .unwrap_or(Vec::new(&env))
+        env.storage().instance().get(&key).unwrap_or(Vec::new(&env))
     }
 
     pub fn get_min_score(env: Env) -> u32 {
@@ -2776,7 +2779,8 @@ impl LoanManager {
             .instance()
             .get(&DataKey::Token)
             .expect("token not set");
-        Self::adjust_total_outstanding(&env, &token, -loan.amount);
+        let remaining_principal = Self::remaining_principal(&loan);
+        Self::adjust_total_outstanding(&env, &token, -remaining_principal);
         env.storage().persistent().set(&loan_key, &loan);
         Self::bump_persistent_ttl(&env, &loan_key);
         Self::decrement_borrower_loan_count(&env, &loan.borrower);
@@ -2933,7 +2937,8 @@ impl LoanManager {
                 .instance()
                 .get(&DataKey::Token)
                 .expect("token not set");
-            Self::adjust_total_outstanding(&env, &token, -loan.amount);
+            let remaining_principal = Self::remaining_principal(&loan);
+            Self::adjust_total_outstanding(&env, &token, -remaining_principal);
             env.storage().persistent().set(&loan_key, &loan);
             Self::bump_persistent_ttl(&env, &loan_key);
             Self::decrement_borrower_loan_count(&env, &loan.borrower);
