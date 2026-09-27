@@ -188,6 +188,7 @@ export const contestDefault = asyncHandler(
 
     // Notify admins via email, SSE, and optional webhook
     await notificationService.notifyAdmins({
+      type: 'dispute_contested',
       title: 'Loan Default Contested',
       message: `Borrower ${borrower} has contested the default on loan #${loanId}. Reason: ${reason}`,
       loanId: Number(loanId),
