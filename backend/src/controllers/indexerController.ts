@@ -1,4 +1,6 @@
 import type { Request, Response } from 'express';
+import { isIP } from 'node:net';
+import { lookup as dnsLookup } from 'node:dns/promises';
 import { xdr } from '@stellar/stellar-sdk';
 import { query } from '../db/connection.js';
 import { EventIndexer, type SorobanRawEvent } from '../services/eventIndexer.js';
@@ -19,33 +21,81 @@ import { parseCappedLimit } from '../utils/queryHelpers.js';
 import logger from '../utils/logger.js';
 
 /**
- * Returns true if the hostname resolves to a private, loopback, or link-local
- * address that should never receive outbound webhook deliveries (SSRF guard).
+ * Returns true if `ip` (a literal IPv4/IPv6 address) is loopback, link-local,
+ * private-range, or an unspecified/broadcast address that should never
+ * receive outbound webhook deliveries (SSRF guard).
  */
-function isPrivateHost(hostname: string): boolean {
+function isPrivateIp(ip: string): boolean {
+  // Normalize IPv4-mapped IPv6 (::ffff:127.0.0.1) down to the IPv4 form so the
+  // v4 checks below still catch it.
+  const v4Mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);
+  const host = v4Mapped ? v4Mapped[1]! : ip;
+
+  if (isIP(host) === 4) {
+    if (host === '0.0.0.0') return true;
+    if (/^127\./.test(host)) return true;
+    if (/^169\.254\./.test(host)) return true;
+    if (/^10\./.test(host)) return true;
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
+    if (/^192\.168\./.test(host)) return true;
+    return false;
+  }
+
+  if (isIP(host) === 6) {
+    const normalized = host.toLowerCase();
+    if (normalized === '::1' || normalized === '::') return true;
+    if (/^fe80:/.test(normalized)) return true;
+    // Unique local addresses (fc00::/7)
+    if (/^f[cd][0-9a-f]{2}:/.test(normalized)) return true;
+    return false;
+  }
+
+  // Not a literal IP address at all.
+  return false;
+}
+
+/**
+ * Returns true if `hostname` is, or resolves via DNS to, a private, loopback,
+ * link-local, or otherwise internal-only address. This is the SSRF guard for
+ * outbound webhook callback URLs.
+ *
+ * Checking only the literal hostname string (as this used to do) is not
+ * sufficient: an attacker can register a public-looking domain whose DNS
+ * record points at 127.0.0.1 or a cloud metadata IP (169.254.169.254),
+ * sailing straight past a string-only check. The hostname must actually be
+ * resolved and every returned address checked.
+ */
+async function isPrivateHost(hostname: string): Promise<boolean> {
   // Strip IPv6 brackets
   const host = hostname.replace(/^\[|\]$/g, '');
 
-  // Loopback
-  if (host === 'localhost' || host === '::1') return true;
-  if (/^127\./.test(host)) return true;
+  if (host === 'localhost') return true;
 
-  // Link-local (169.254.x.x, fe80::)
-  if (/^169\.254\./.test(host)) return true;
-  if (/^fe80:/i.test(host)) return true;
-
-  // Private IPv4 ranges (RFC 1918)
-  if (/^10\./.test(host)) return true;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
-  if (/^192\.168\./.test(host)) return true;
-
-  // AWS / GCP metadata endpoints
-  if (host === '169.254.169.254' || host === 'metadata.google.internal') return true;
+  // AWS / GCP metadata hostnames
+  if (host === 'metadata.google.internal') return true;
 
   // Catch-all for unqualified single-label hostnames (e.g. "internal", "db")
-  if (!host.includes('.') && host !== '::1') return true;
+  // that are neither a literal IP nor resolvable as a normal FQDN.
+  if (!host.includes('.') && !host.includes(':') && isIP(host) === 0) return true;
 
-  return false;
+  // Literal IP address supplied directly — check it without a DNS round trip.
+  if (isIP(host) !== 0) {
+    return isPrivateIp(host);
+  }
+
+  // Resolve the hostname and check every address it comes back with — a
+  // hostname can resolve to multiple IPs, and only one needs to be internal
+  // for this to be exploitable (DNS rebinding).
+  let addresses: { address: string }[];
+  try {
+    addresses = await dnsLookup(host, { all: true, verbatim: true });
+  } catch {
+    // Unresolvable hostname — reject rather than letting an ambiguous name
+    // through to the delivery attempt.
+    return true;
+  }
+
+  return addresses.some((a) => isPrivateIp(a.address));
 }
 import { getStellarRpcUrl } from '../config/stellar.js';
 
@@ -632,7 +682,7 @@ export const createWebhookSubscription = async (req: Request, res: Response) => 
       });
     }
 
-    if (isPrivateHost(parsedUrl.hostname)) {
+    if (await isPrivateHost(parsedUrl.hostname)) {
       return res.status(400).json({
         success: false,
         message: 'callbackUrl must not target a private, loopback, or link-local address',
