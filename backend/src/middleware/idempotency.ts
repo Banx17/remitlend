@@ -43,6 +43,31 @@ interface RequestFingerprint {
   method: string;
   path: string;
   bodyHash: string;
+  /** Wallet the key is namespaced to — `anon` when unauthenticated. */
+  actor: string;
+}
+
+/** Cache/lock key namespace for a given actor + client-supplied key (#1809). */
+export function namespacedKey(actor: string, key: string): string {
+  return `${actor}:${key}`;
+}
+
+/**
+ * Identifies the caller an Idempotency-Key belongs to.
+ *
+ * Idempotency keys are chosen by the client, so a bare `idemp:${key}` cache key
+ * is shared by every user: one caller could pre-empt or collide with another
+ * caller's key, getting their request rejected with 409 (denial of service) or
+ * reading back a cached status. Namespacing by authenticated wallet makes the
+ * key private to its owner while remaining stable for genuine client retries.
+ *
+ * Unauthenticated requests share the `anon` namespace — the routes that accept
+ * an Idempotency-Key are authenticated (`requireJwtAuth` runs first), so this is
+ * a defensive fallback rather than a supported mode.
+ */
+function actorOf(req: Request): string {
+  const wallet = (req as Request & { user?: { publicKey?: string } }).user?.publicKey;
+  return typeof wallet === 'string' && wallet.trim() ? wallet.trim() : 'anon';
 }
 
 /**
@@ -59,7 +84,14 @@ export function computeFingerprint(req: Request): RequestFingerprint {
   const method = req.method;
   const path = (req.originalUrl ?? `${req.baseUrl ?? ''}${req.path ?? ''}`).split('?')[0] ?? '';
   const bodyHash = hashBody(req.body);
-  return { fingerprint: `${method} ${path}#${bodyHash}`, method, path, bodyHash };
+  const actor = actorOf(req);
+  return {
+    fingerprint: `${method} ${path}#${bodyHash}`,
+    method,
+    path,
+    bodyHash,
+    actor,
+  };
 }
 
 /**
@@ -89,9 +121,14 @@ export const idempotencyMiddleware = async (
   }
 
   try {
-    const { fingerprint } = computeFingerprint(req);
-    const cacheKey = `idemp:${key}`;
-    const lockKey = `idemp:${key}:lock`;
+    // Both keys are namespaced by the authenticated wallet, so one user can
+    // never collide with, pre-empt, or read back another user's idempotency
+    // key — the raw header value is client-chosen and therefore not a safe
+    // global identifier (#1809).
+    const { fingerprint, actor } = computeFingerprint(req);
+    const scopedKey = namespacedKey(actor, key);
+    const cacheKey = `idemp:${scopedKey}`;
+    const lockKey = `idemp:${scopedKey}:lock`;
     const cached = await cacheService.get<CachedResponse>(cacheKey);
 
     if (cached) {
