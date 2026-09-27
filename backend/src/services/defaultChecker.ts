@@ -354,9 +354,7 @@ export class DefaultChecker {
     // with `{ type: 'u32' }` throws a TypeError. Build the u32 elements
     // individually and wrap them in a Vec to match the contract's
     // `check_defaults(loan_ids: Vec<u32>)` signature.
-    const loanIdsScVal = xdr.ScVal.scvVec(
-      loanIds.map((id) => nativeToScVal(id, { type: 'u32' })),
-    );
+    const loanIdsScVal = xdr.ScVal.scvVec(loanIds.map((id) => nativeToScVal(id, { type: 'u32' })));
 
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
