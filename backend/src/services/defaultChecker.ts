@@ -6,6 +6,7 @@ import {
   TransactionBuilder,
   nativeToScVal,
   rpc,
+  xdr,
 } from '@stellar/stellar-sdk';
 import { query } from '../db/connection.js';
 import logger from '../utils/logger.js';
@@ -348,7 +349,14 @@ export class DefaultChecker {
     loanIds: number[],
     account: Account,
   ): Promise<DefaultCheckBatchResult> {
-    const loanIdsScVal = nativeToScVal(loanIds, { type: 'u32' });
+    // `nativeToScVal` with a `type` hint applies to a single scalar value, not
+    // to each element of an array — passing `loanIds` (a number[]) directly
+    // with `{ type: 'u32' }` throws a TypeError. Build the u32 elements
+    // individually and wrap them in a Vec to match the contract's
+    // `check_defaults(loan_ids: Vec<u32>)` signature.
+    const loanIdsScVal = xdr.ScVal.scvVec(
+      loanIds.map((id) => nativeToScVal(id, { type: 'u32' })),
+    );
 
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
