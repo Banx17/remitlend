@@ -220,7 +220,8 @@ impl RemittanceNFT {
         Self::write_authorized_minters_list(env, &updated);
 
         if was_authorized {
-            env.events().publish((symbol_short!("MntRev"), minter.clone()), ());
+            env.events()
+                .publish((symbol_short!("MntRev"), minter.clone()), ());
         }
     }
 

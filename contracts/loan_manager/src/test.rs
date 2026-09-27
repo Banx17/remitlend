@@ -4945,6 +4945,60 @@ fn test_get_total_outstanding_decreases_on_check_default() {
 }
 
 #[test]
+fn test_check_defaults_partially_repaid_loan_removes_only_remaining_principal() {
+    // Regression test for #1771: defaulting a partially repaid loan must
+    // subtract only its remaining principal from total_outstanding, not the
+    // original loan amount.
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (manager, nft_client, pool_client, token_id, _token_admin) = setup_test(&env);
+    let borrower = Address::generate(&env);
+    let other_borrower = Address::generate(&env);
+
+    let history_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    for b in [&borrower, &other_borrower] {
+        nft_client.mint(
+            b,
+            &600,
+            &history_hash,
+            &String::from_str(&env, "ipfs://QmTest"),
+            &create_test_commitment(&env, 1),
+            &None,
+        );
+    }
+
+    let stellar_token = StellarAssetClient::new(&env, &token_id);
+    stellar_token.mint(&pool_client, &10_000);
+    stellar_token.mint(&borrower, &10_000);
+
+    let loan_id = manager.request_loan(&borrower, &1_000, &17_280);
+    manager.approve_loan(&loan_id);
+    let other_loan_id = manager.request_loan(&other_borrower, &2_000, &34_560);
+    manager.approve_loan(&other_loan_id);
+    assert_eq!(manager.get_total_outstanding(&token_id), 3_000);
+
+    manager.repay(&borrower, &loan_id, &500);
+    let loan = manager.get_loan(&loan_id);
+    assert!(loan.principal_paid > 0);
+    let remaining_principal = loan.amount - loan.principal_paid;
+    assert_eq!(
+        manager.get_total_outstanding(&token_id),
+        remaining_principal + 2_000
+    );
+
+    let default_window = manager.get_default_window_ledgers();
+    env.ledger()
+        .set_sequence_number(loan.due_date + default_window + 1);
+
+    let defaulted = manager.check_defaults(&soroban_sdk::vec![&env, loan_id]);
+    assert_eq!(defaulted, 1);
+    assert_eq!(manager.get_loan(&loan_id).status, LoanStatus::Defaulted);
+    // Only the other loan's principal remains outstanding.
+    assert_eq!(manager.get_total_outstanding(&token_id), 2_000);
+}
+
+#[test]
 fn test_get_total_outstanding_returns_to_baseline_after_liquidation() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
