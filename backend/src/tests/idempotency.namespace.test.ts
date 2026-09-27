@@ -88,26 +88,36 @@ describe('idempotencyMiddleware key namespacing (#1809)', () => {
 
     it('does not replay another wallet’s cached response', async () => {
       // Bob's response is already cached under his namespace…
-      asMock(cacheService.get).mockResolvedValue({
+      const bobCached = {
         status: 201,
         body: { id: 'bob-loan' },
         fingerprint: computeFingerprint(buildRequest(BOB) as Request).fingerprint,
-      });
+      };
+      // Key-aware store: only Bob's namespaced key holds an entry.
+      asMock(cacheService.get).mockImplementation(async (key: unknown) =>
+        key === `idemp:${namespacedKey(BOB, 'shared-key')}` ? bobCached : null,
+      );
 
       // …so Alice sending the identical key, path and body gets a cache miss
       // and runs the handler instead of receiving Bob's response.
+      // The middleware wraps res.json on a miss, so keep the original mock.
+      const originalJson = asMock(res.json);
       await idempotencyMiddleware(req as Request, res as Response, next);
 
-      expect(cacheKeysRead()[0]).not.toContain('bob-loan');
-      expect(res.json).not.toHaveBeenCalledWith({ id: 'bob-loan' });
+      expect(cacheKeysRead()[0]).toContain(ALICE);
+      expect(originalJson).not.toHaveBeenCalledWith({ id: 'bob-loan' });
+      expect(next).toHaveBeenCalled();
     });
 
     it('does not reject a user with 409 because another user holds the key', async () => {
       // Bob's in-flight lock is held under his namespace.
       asMock(cacheService.get).mockResolvedValue(null);
-      asMock(cacheService.setNotExists).mockResolvedValue(false);
+      // Key-aware lock store: only Bob's namespaced lock is taken.
+      const bobLock = `idemp:${namespacedKey(BOB, 'shared-key')}:lock`;
+      asMock(cacheService.setNotExists).mockImplementation(async (key: unknown) => key !== bobLock);
 
       await idempotencyMiddleware(req as Request, res as Response, next);
+      expect(next).toHaveBeenCalled();
 
       // Alice is unaffected by Bob's lock: the handler still runs.
       expect(asMock(res.status)).not.toHaveBeenCalledWith(409);

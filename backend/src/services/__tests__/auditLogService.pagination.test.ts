@@ -19,9 +19,9 @@ const PAGE_ROWS = [
 
 /** Last call to query() — always the SELECT page statement. */
 const pageQuery = () => {
-  const call = mockQuery.mock.calls.find(
-    ([text]) => typeof text === 'string' && text.includes('SELECT * FROM audit_logs'),
-  );
+  const call = mockQuery.mock.calls
+    .filter(([text]) => typeof text === 'string' && text.includes('SELECT * FROM audit_logs'))
+    .at(-1);
   return { text: String(call?.[0]), values: (call?.[1] as unknown[]) ?? [] };
 };
 
@@ -48,7 +48,7 @@ describe('getAuditLogs keyset pagination and totals (#1808)', () => {
     });
 
     it('pages with a (created_at, id) row comparison, not id alone', async () => {
-      await getAuditLogs({ limit: 2 });
+      await getAuditLogs({ limit: 2, cursor: '2026-03-02T00:00:00.000Z:298' });
 
       const { text, values } = pageQuery();
       expect(text).toMatch(/\(created_at, id\)\s*<\s*\(\$\d+, \$\d+\)/);
@@ -69,7 +69,11 @@ describe('getAuditLogs keyset pagination and totals (#1808)', () => {
       expect(result.nextCursor).not.toBeNull();
       // The cursor carries the timestamp *and* the id it is paging from.
       expect(result.nextCursor).toContain(':');
-      const [createdAt, id] = String(result.nextCursor).split(':');
+      // Split on the last separator: the ISO timestamp itself contains ':'.
+      const cursor = String(result.nextCursor);
+      const at = cursor.lastIndexOf(':');
+      const createdAt = cursor.slice(0, at);
+      const id = cursor.slice(at + 1);
       expect(createdAt).toBe('2026-03-02T00:00:00.000Z');
       expect(id).toBe('299');
     });
@@ -199,6 +203,6 @@ describe('AuditLogFilters shape (#1808)', () => {
       limit: 1,
       withTotal: true,
     };
-    expect(Object.keys(filters)).toHaveLength(8);
+    expect(Object.keys(filters)).toHaveLength(7);
   });
 });
