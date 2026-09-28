@@ -1227,7 +1227,7 @@ fn test_transfer_rejects_destination_with_existing_state() {
 }
 
 #[test]
-fn test_transfer_rejects_burned_destination() {
+fn test_transfer_rejects_auto_burned_destination() {
     // Regression test: transfer only checked has_any_remittance_state(to),
     // which looks at Metadata/Score only. burn_internal() removes those two
     // keys but leaves Burned(to) set, so a burned destination previously
