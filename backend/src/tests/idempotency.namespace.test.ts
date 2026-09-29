@@ -87,30 +87,44 @@ describe('idempotencyMiddleware key namespacing (#1809)', () => {
     });
 
     it('does not replay another wallet’s cached response', async () => {
-      // Bob's response is already cached under his namespace…
-      asMock(cacheService.get).mockResolvedValue({
-        status: 201,
-        body: { id: 'bob-loan' },
-        fingerprint: computeFingerprint(buildRequest(BOB) as Request).fingerprint,
-      });
+      // Bob's response is already cached under *his* namespace. Redis is keyed,
+      // so only Bob's namespace holds it — the mock models that by answering
+      // per key instead of returning Bob's entry for any key.
+      asMock(cacheService.get).mockImplementation((key: unknown) =>
+        String(key).includes(BOB)
+          ? {
+              status: 201,
+              body: { id: 'bob-loan' },
+              fingerprint: computeFingerprint(buildRequest(BOB) as Request).fingerprint,
+            }
+          : null,
+      );
 
       // …so Alice sending the identical key, path and body gets a cache miss
-      // and runs the handler instead of receiving Bob's response.
+      // and runs the handler instead of receiving Bob's response. `res.json` is
+      // captured up-front because the middleware wraps it on a cache miss.
+      const jsonSpy = asMock(res.json);
       await idempotencyMiddleware(req as Request, res as Response, next);
 
-      expect(cacheKeysRead()[0]).not.toContain('bob-loan');
-      expect(res.json).not.toHaveBeenCalledWith({ id: 'bob-loan' });
+      expect(cacheKeysRead()[0]).toContain(ALICE);
+      expect(cacheKeysRead()[0]).not.toContain(BOB);
+      expect(jsonSpy).not.toHaveBeenCalledWith({ id: 'bob-loan' });
+      expect(next).toHaveBeenCalled();
     });
 
     it('does not reject a user with 409 because another user holds the key', async () => {
-      // Bob's in-flight lock is held under his namespace.
+      // Bob's in-flight lock is held under his namespace, so the reservation is
+      // only refused for Bob's namespaced lock key.
       asMock(cacheService.get).mockResolvedValue(null);
-      asMock(cacheService.setNotExists).mockResolvedValue(false);
+      asMock(cacheService.setNotExists).mockImplementation((key: unknown) =>
+        Promise.resolve(!String(key).includes(BOB)),
+      );
 
       await idempotencyMiddleware(req as Request, res as Response, next);
 
       // Alice is unaffected by Bob's lock: the handler still runs.
       expect(asMock(res.status)).not.toHaveBeenCalledWith(409);
+      expect(next).toHaveBeenCalled();
     });
 
     it('namespaces the lock key as well as the cache key', async () => {
