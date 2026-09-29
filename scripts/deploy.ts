@@ -235,8 +235,14 @@ async function main() {
     //   d. LoanManager.initialize takes (nft, pool, token, admin) so both NFT and
     //      Pool addresses must be known first.
     //   e. Governance.initialize takes (admin, targets). It governs every
-    //      contract with an admin role, so each one proposes Governance as its
-    //      admin and Governance.accept_target_admins completes the handover.
+    //      RemitLend protocol contract that maintains an admin role: LendingPool,
+    //      LoanManager, and RemittanceNFT. Target selection must match the Admin API:
+    //      each target exposes `propose_admin(new_admin: Address)`, `accept_admin()`,
+    //      and `set_admin(new_admin: Address)`. At deploy time, each target proposes
+    //      Governance as its admin and Governance.accept_target_admins completes the
+    //      handover. When finalize_admin_transfer runs, Governance cross-invokes
+    //      `propose_admin(new_admin)` on all targets, which the new admin completes
+    //      by calling `accept_admin()`.
     //
     console.log('\n[3/4] Initializing contracts…');
 
