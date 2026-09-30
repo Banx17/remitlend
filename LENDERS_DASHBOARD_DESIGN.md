@@ -6,9 +6,9 @@ RemitLend's Lender Command Center is a high-performance dashboard built for liqu
 
 ---
 
-## Key Design Contributions
+##Key Design Contributions
 
-### Yield Data Visualization
+###Yield Data Visualization
 
 Designed the **Total Yield Generated** interactive chart, giving lenders a clear view of their earnings over time. Users can toggle between timeframes (1D, 1W, 1M) to track percentage growth at a glance. The chart uses smooth curve rendering against the dark background to keep focus on the numbers.
 
