@@ -20,7 +20,7 @@ jest.unstable_mockModule('../../services/cacheService.js', () => ({
   },
 }));
 
-const { generateJwtToken, revokeToken, decodeJwtToken, isTokenRevoked } =
+const { generateJwtToken, revokeToken, decodeJwtToken } =
   await import('../../services/authService.js');
 const { requireJwtAuth, requireScopes } = await import('../jwtAuth.js');
 

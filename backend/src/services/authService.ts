@@ -223,7 +223,10 @@ export async function isTokenRevoked(jti: string): Promise<boolean> {
     const revoked = await Promise.race([
       cacheService.get<boolean>(`${REVOKED_JTI_PREFIX}${jti}`),
       new Promise<never>((_resolve, reject) =>
-        setTimeout(() => reject(new Error('Revocation check timeout')), REVOCATION_CHECK_TIMEOUT_MS),
+        setTimeout(
+          () => reject(new Error('Revocation check timeout')),
+          REVOCATION_CHECK_TIMEOUT_MS,
+        ),
       ),
     ]);
 
