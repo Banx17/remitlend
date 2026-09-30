@@ -188,6 +188,7 @@ export const contestDefault = asyncHandler(
 
     // Notify admins via email, SSE, and optional webhook
     await notificationService.notifyAdmins({
+      type: 'dispute_contested',
       title: 'Loan Default Contested',
       message: `Borrower ${borrower} has contested the default on loan #${loanId}. Reason: ${reason}`,
       loanId: Number(loanId),
@@ -573,6 +574,7 @@ export const getLoanDetails = asyncHandler(async (req: Request, res: Response) =
         termLedgers,
       });
   const accruedInterest = Number(accruedInterestStroops);
+  // Issue #1369: Owed amount must add accrued interest to remaining principal (not subtract).
   // remaining principal + interest accrued on it == principal + accrued - totalRepaid
   const totalOwed = Number(
     remainingPrincipal(principalStroops, totalRepaidStroops) + accruedInterestStroops,
