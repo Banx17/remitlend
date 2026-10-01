@@ -19,9 +19,10 @@ const PAGE_ROWS = [
 
 /** Last call to query() — always the SELECT page statement. */
 const pageQuery = () => {
-  const call = mockQuery.mock.calls.find(
+  const calls = mockQuery.mock.calls.filter(
     ([text]) => typeof text === 'string' && text.includes('SELECT * FROM audit_logs'),
   );
+  const call = calls[calls.length - 1];
   return { text: String(call?.[0]), values: (call?.[1] as unknown[]) ?? [] };
 };
 
@@ -71,6 +72,10 @@ describe('getAuditLogs keyset pagination and totals (#1808)', () => {
       const cursor = String(result.nextCursor);
       expect(cursor).toContain(':');
       // The ISO timestamp itself contains ':', so split on the last one.
+      // The cursor carries the timestamp *and* the id it is paging from. The
+      // ISO timestamp itself contains colons, so split on the final one.
+      const cursor = String(result.nextCursor);
+      expect(cursor).toContain(':');
       const separatorAt = cursor.lastIndexOf(':');
       expect(cursor.slice(0, separatorAt)).toBe('2026-03-02T00:00:00.000Z');
       expect(cursor.slice(separatorAt + 1)).toBe('299');
