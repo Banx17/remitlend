@@ -28,6 +28,10 @@ pub enum NftError {
     MinterLimitReached = 19,
     CommitmentMalformed = 20,
     CommitmentMissing = 21,
+    /// Returned by `transfer` when the sender has one or more active loans
+    /// (Pending or Approved) in the registered LoanManager.  Borrowers must
+    /// fully repay or cancel all loans before relocating their reputation NFT.
+    ActiveLoanExists = 22,
 }
 
 #[contracttype]
@@ -65,6 +69,22 @@ pub enum DataKey {
     ProposedAdmin,
     MinRepaymentAmount,
     RecipientCommitment(Address),
+    /// Optional address of the LoanManager contract used to enforce the
+    /// active-loan transfer guard (see `transfer`).
+    LoanManager,
+}
+
+/// Minimal cross-contract interface exposed by the LoanManager contract.
+///
+/// Only the subset of methods required for the active-loan transfer guard is
+/// declared here.  The discriminants match the actual LoanStatus enum in
+/// loan_manager: Pending = 0, Approved = 1.
+#[soroban_sdk::contractclient(name = "LoanManagerClient")]
+pub trait LoanManagerInterface {
+    /// Returns the list of loan IDs associated with the given borrower.
+    fn get_borrower_loans(env: Env, borrower: Address) -> soroban_sdk::Vec<u32>;
+    /// Returns the raw status discriminant of a single loan.
+    fn get_loan_status(env: Env, loan_id: u32) -> u32;
 }
 
 #[contract]
@@ -178,6 +198,56 @@ impl RemittanceNFT {
         let list_key = DataKey::AuthorizedMinters;
         env.storage().persistent().set(&list_key, list);
         Self::bump_persistent_ttl(env, &list_key);
+    }
+
+    /// Remove `minter` from the authorized-minter set without requiring auth.
+    /// Used internally during admin rotation (#1773) so a decommissioned admin
+    /// key cannot keep minting, updating scores, or seizing NFTs.
+    fn revoke_minter_internal(env: &Env, minter: &Address) {
+        let key = DataKey::AuthorizedMinter(minter.clone());
+        let was_authorized = env.storage().persistent().has(&key);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::AuthorizedMinter(minter.clone()));
+
+        let minters = Self::get_authorized_minters_list(env);
+        let mut updated = Vec::new(env);
+        for existing in minters.iter() {
+            if existing != *minter {
+                updated.push_back(existing);
+            }
+        }
+        Self::write_authorized_minters_list(env, &updated);
+
+        if was_authorized {
+            env.events()
+                .publish((symbol_short!("MntRev"), minter.clone()), ());
+        }
+    }
+
+    /// Grant minter authorization without requiring auth. Used internally
+    /// during admin rotation (#1773) to ensure the incoming admin can operate
+    /// as a minter. No-op if already authorized or the minter cap is reached.
+    fn authorize_minter_internal(env: &Env, minter: &Address) {
+        let key = DataKey::AuthorizedMinter(minter.clone());
+        if env.storage().persistent().has(&key) {
+            Self::bump_persistent_ttl(env, &key);
+            return;
+        }
+
+        let mut minters = Self::get_authorized_minters_list(env);
+        if minters.len() >= Self::MAX_AUTHORIZED_MINTERS {
+            return;
+        }
+
+        minters.push_back(minter.clone());
+        Self::write_authorized_minters_list(env, &minters);
+
+        env.storage().persistent().set(&key, &true);
+        Self::bump_persistent_ttl(env, &key);
+
+        env.events()
+            .publish((symbol_short!("MntAuth"), minter.clone()), ());
     }
 
     fn validate_metadata_uri(env: &Env, uri: &String) -> Result<(), NftError> {
@@ -345,6 +415,9 @@ impl RemittanceNFT {
         env.storage()
             .persistent()
             .remove(&DataKey::RecipientCommitment(user.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DefaultCount(user.clone()));
 
         let burned_key = DataKey::Burned(user.clone());
         env.storage().persistent().set(&burned_key, &true);
@@ -521,7 +594,7 @@ impl RemittanceNFT {
         }
 
         let metadata = RemittanceMetadata {
-            score: initial_score.min(Self::MAX_SCORE),
+            score: initial_score.clamp(Self::MIN_CREDIT_SCORE, Self::MAX_SCORE),
             history_hash,
             metadata_uri,
         };
@@ -609,10 +682,13 @@ impl RemittanceNFT {
         env.storage()
             .persistent()
             .remove(&DataKey::TransferCooldown(user.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DefaultCount(user.clone()));
 
         // Write the new NFT metadata.
         let metadata = RemittanceMetadata {
-            score: initial_score.min(Self::MAX_SCORE),
+            score: initial_score.clamp(Self::MIN_CREDIT_SCORE, Self::MAX_SCORE),
             history_hash,
             metadata_uri,
         };
@@ -956,6 +1032,29 @@ impl RemittanceNFT {
         from.require_auth();
         Self::require_admin_or_authorized_minter(&env, minter)?;
 
+        // Guard: block transfers while the sender has active loans.
+        //
+        // If a LoanManager address has been registered via `set_loan_manager`,
+        // we cross-call it to verify that none of the borrower's loans are in
+        // an active state (Pending = 0, Approved = 1).  This prevents the
+        // "credit wash" attack where a borrower facing default races to move
+        // their unblemished NFT to a clean address before penalties are applied.
+        if let Some(loan_manager_addr) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::LoanManager)
+        {
+            let loan_manager = LoanManagerClient::new(&env, &loan_manager_addr);
+            let loan_ids = loan_manager.get_borrower_loans(&from);
+            for loan_id in loan_ids.iter() {
+                // LoanStatus::Pending = 0, LoanStatus::Approved = 1
+                let status = loan_manager.get_loan_status(&loan_id);
+                if status == 0 || status == 1 {
+                    return Err(NftError::ActiveLoanExists);
+                }
+            }
+        }
+
         let transfer_cooldown_key = DataKey::TransferCooldown(from.clone());
         if let Some(next_allowed_ledger) = env
             .storage()
@@ -1055,6 +1154,15 @@ impl RemittanceNFT {
             .persistent()
             .set(&to_cooldown_key, &next_allowed_ledger);
         Self::bump_persistent_ttl(&env, &to_cooldown_key);
+
+        // #1774: tombstone the sender so it cannot immediately mint() a fresh
+        // NFT to reset its credit history. mint() rejects Burned addresses
+        // (BurnedRequiresApproval), so recovery for `from` now requires
+        // explicit admin approval via approve_remint() + admin_remint() —
+        // the same gate burn_internal() enforces.
+        let from_burned_key = DataKey::Burned(from.clone());
+        env.storage().persistent().set(&from_burned_key, &true);
+        Self::bump_persistent_ttl(&env, &from_burned_key);
 
         env.events()
             .publish((symbol_short!("Transfer"), from, to), ());
@@ -1233,6 +1341,12 @@ impl RemittanceNFT {
         env.storage().instance().remove(&DataKey::ProposedAdmin);
         Self::bump_instance_ttl(&env);
 
+        // #1773: revoke minter privileges from the previous admin so a
+        // compromised or decommissioned key cannot keep minting, updating
+        // scores, or seizing NFTs after rotation. Authorize the new admin.
+        Self::revoke_minter_internal(&env, &previous_admin);
+        Self::authorize_minter_internal(&env, &proposed_admin);
+
         env.events().publish(
             (
                 Symbol::new(&env, "AdminTransferred"),
@@ -1251,6 +1365,11 @@ impl RemittanceNFT {
         env.storage().instance().remove(&DataKey::ProposedAdmin);
         Self::bump_instance_ttl(&env);
 
+        // #1773: same revocation as accept_admin — the previous admin must
+        // lose AuthorizedMinter privileges when the role migrates.
+        Self::revoke_minter_internal(&env, &current_admin);
+        Self::authorize_minter_internal(&env, &new_admin);
+
         env.events().publish(
             (
                 Symbol::new(&env, "AdminTransferred"),
@@ -1258,6 +1377,36 @@ impl RemittanceNFT {
             ),
             (current_admin, new_admin),
         );
+    }
+
+    /// Register (or replace) the LoanManager contract address used by the
+    /// active-loan transfer guard.
+    ///
+    /// Must be called by the admin.  Once set, every call to `transfer` will
+    /// cross-call the LoanManager to ensure the sender has no Pending or
+    /// Approved loans.  Pass the zero-address or call with a subsequent
+    /// `set_loan_manager` to replace the address.
+    ///
+    /// Reverts with `ContractPaused` if the contract is paused.
+    pub fn set_loan_manager(env: Env, loan_manager: Address) -> Result<(), NftError> {
+        Self::admin(&env).require_auth();
+        Self::assert_not_paused(&env)?;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::LoanManager, &loan_manager);
+        Self::bump_instance_ttl(&env);
+
+        env.events()
+            .publish((Symbol::new(&env, "LoanMgrSet"),), loan_manager);
+        Ok(())
+    }
+
+    /// Return the currently registered LoanManager contract address, or
+    /// `None` if no address has been set.
+    pub fn get_loan_manager(env: Env) -> Option<Address> {
+        Self::bump_instance_ttl(&env);
+        env.storage().instance().get(&DataKey::LoanManager)
     }
 }
 
