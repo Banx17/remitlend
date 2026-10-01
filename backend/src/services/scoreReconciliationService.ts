@@ -103,10 +103,7 @@ class ScoreReconciliationService {
       );
       rows = result.rows;
     } catch (err: any) {
-      if (
-        err &&
-        (err.code === '42703' || String(err.message).includes('does not exist'))
-      ) {
+      if (err && (err.code === '42703' || String(err.message).includes('does not exist'))) {
         const fallbackResult = await query(
           `
           WITH active_loans AS (

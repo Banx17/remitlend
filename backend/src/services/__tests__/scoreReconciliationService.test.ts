@@ -126,12 +126,10 @@ describe('scoreReconciliationService', () => {
       const err = new Error('column s.borrower does not exist') as any;
       err.code = '42703';
 
-      mockQuery
-        .mockRejectedValueOnce(err)
-        .mockResolvedValueOnce({
-          rows: [{ address: 'GB...XYZ', score: 720 }],
-          rowCount: 1,
-        });
+      mockQuery.mockRejectedValueOnce(err).mockResolvedValueOnce({
+        rows: [{ address: 'GB...XYZ', score: 720 }],
+        rowCount: 1,
+      });
 
       mockGetOnChainCreditScore.mockResolvedValueOnce(720);
 
