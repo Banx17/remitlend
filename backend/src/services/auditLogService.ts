@@ -24,8 +24,7 @@ export function encodeCursor(row: Record<string, unknown> | undefined): string |
   const id = row.id;
   const createdAt = row.created_at;
   if (id === undefined || id === null || !createdAt) return null;
-  const createdAtIso =
-    createdAt instanceof Date ? createdAt.toISOString() : String(createdAt);
+  const createdAtIso = createdAt instanceof Date ? createdAt.toISOString() : String(createdAt);
   return `${createdAtIso}${CURSOR_SEPARATOR}${String(id)}`;
 }
 
@@ -104,12 +103,11 @@ export async function getAuditLogs(filters: AuditLogFilters) {
   if (withTotal === true) {
     // The total reflects the active filters but not the keyset cursor: a total
     // describes the whole filtered result set, not the remaining pages (#1808).
-    const filterClause =
-      filterConditions.length > 0 ? `WHERE ${filterConditions.join(' AND ')}` : '';
-    const countResult = await query(
-      `SELECT COUNT(*) as count FROM audit_logs ${filterClause}`,
-      filterValues,
-    );
+    const countSql =
+      filterConditions.length > 0
+        ? `SELECT COUNT(*) as count FROM audit_logs WHERE ${filterConditions.join(' AND ')}`
+        : 'SELECT COUNT(*) as count FROM audit_logs';
+    const countResult = await query(countSql, filterValues);
     total = Number((countResult.rows[0] as Record<string, unknown>)?.count ?? 0);
   }
 
