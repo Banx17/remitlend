@@ -50,7 +50,7 @@ describe('getAuditLogs keyset pagination and totals (#1808)', () => {
     });
 
     it('pages with a (created_at, id) row comparison, not id alone', async () => {
-      await getAuditLogs({ limit: 2, cursor: '2026-03-02T00:00:00.000Z:298' });
+      await getAuditLogs({ limit: 2, cursor: '2026-03-02T00:00:00.000Z:299' });
 
       const { text, values } = pageQuery();
       expect(text).toMatch(/\(created_at, id\)\s*<\s*\(\$\d+, \$\d+\)/);
