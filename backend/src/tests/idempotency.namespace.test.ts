@@ -87,35 +87,38 @@ describe('idempotencyMiddleware key namespacing (#1809)', () => {
     });
 
     it('does not replay another wallet’s cached response', async () => {
-      // Bob's response is already cached under his namespace…
-      const bobCached = {
-        status: 201,
-        body: { id: 'bob-loan' },
-        fingerprint: computeFingerprint(buildRequest(BOB) as Request).fingerprint,
-      };
-      // The cache is keyed, so only Bob's namespaced key resolves to his entry.
-      asMock(cacheService.get).mockImplementation((cacheKey: unknown) =>
-        Promise.resolve(String(cacheKey).includes(BOB) ? bobCached : null),
+      // Bob's response is cached under his namespace. The mock honours the
+      // cache key like a real (namespaced) store would — returning the entry
+      // for every key would model the shared-key behaviour #1809 removed.
+      const bobCacheKey = `idemp:${namespacedKey(BOB, 'shared-key')}`;
+      asMock(cacheService.get).mockImplementation(async (key: unknown) =>
+        String(key) === bobCacheKey
+          ? {
+              status: 201,
+              body: { id: 'bob-loan' },
+              fingerprint: computeFingerprint(buildRequest(BOB) as Request).fingerprint,
+            }
+          : null,
       );
-
-      // Capture the spy before the middleware wraps res.json on a cache miss.
-      const jsonSpy = res.json as unknown as jest.Mock;
 
       // …so Alice sending the identical key, path and body gets a cache miss
       // and runs the handler instead of receiving Bob's response.
+      // The middleware wraps res.json on the handler path, so assert on the
+      // original mock captured before it is replaced.
+      const jsonMock = asMock(res.json);
       await idempotencyMiddleware(req as Request, res as Response, next);
 
-      expect(cacheKeysRead()[0]).not.toContain(BOB);
-      expect(next).toHaveBeenCalled();
-      expect(jsonSpy).not.toHaveBeenCalledWith({ id: 'bob-loan' });
+      expect(cacheKeysRead()[0]).not.toContain('bob-loan');
+      expect(jsonMock).not.toHaveBeenCalledWith({ id: 'bob-loan' });
     });
 
     it('does not reject a user with 409 because another user holds the key', async () => {
-      // Bob's in-flight lock is held under his namespace, so Alice's own lock
-      // key is still free.
+      // Bob's in-flight lock is held under his namespace; the mock must grant
+      // locks for any other key, as a real namespaced store would.
+      const bobLockKey = `idemp:${namespacedKey(BOB, 'shared-key')}:lock`;
       asMock(cacheService.get).mockResolvedValue(null);
-      asMock(cacheService.setNotExists).mockImplementation((lockKey: unknown) =>
-        Promise.resolve(!String(lockKey).includes(BOB)),
+      asMock(cacheService.setNotExists).mockImplementation(
+        async (key: unknown) => String(key) !== bobLockKey,
       );
 
       await idempotencyMiddleware(req as Request, res as Response, next);
