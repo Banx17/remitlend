@@ -846,7 +846,13 @@ impl RemittanceNFT {
 
         let old_score = metadata.score;
         let decreased = old_score.saturating_sub(penalty_points);
-        let new_score = decreased.max(Self::MIN_CREDIT_SCORE);
+        // Apply the MIN_CREDIT_SCORE floor only to scores that are already at
+        // or above it, then clamp to `old_score` so a penalty can never raise
+        // a score. Without the `.min(old_score)`, a user sitting below the
+        // floor (reachable via `apply_score_delta`/legacy state) would be
+        // bumped *up* to 300 by a penalty — laundering a low score upward and
+        // improving their lending eligibility (#1141).
+        let new_score = decreased.max(Self::MIN_CREDIT_SCORE).min(old_score);
         if new_score == old_score {
             return;
         }
@@ -1081,20 +1087,6 @@ impl RemittanceNFT {
 
         if Self::has_any_remittance_state(&env, &to) {
             return Err(NftError::DestinationOccupied);
-        }
-
-        // A burned destination must not silently regain a clean credit
-        // identity via transfer. Mirrors the same gate mint() applies
-        // (see BurnedRequiresApproval above): recovery for a burned
-        // account can only happen through approve_remint() + admin_remint(),
-        // which clears the Burned flag atomically alongside writing new
-        // metadata. Without this check, has_any_remittance_state(to) alone
-        // is insufficient — burn_internal() removes Metadata/Score but
-        // leaves Burned(to) set, so a burned address would otherwise pass
-        // straight through and end up simultaneously Burned and
-        // credit-bearing.
-        if env.storage().persistent().has(&DataKey::Burned(to.clone())) {
-            return Err(NftError::BurnedRequiresApproval);
         }
 
         let from_metadata_key = DataKey::Metadata(from.clone());

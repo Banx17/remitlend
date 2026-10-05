@@ -175,7 +175,13 @@ describe('loan dispute resolution integration flow', () => {
         ],
         [
           expect.stringContaining('DefaultConfirmed'),
-          expect.arrayContaining([expect.anything(), LOAN_ID, TEST_PUBLIC_KEY]),
+          [
+            expect.any(String),
+            LOAN_ID,
+            TEST_PUBLIC_KEY,
+            `admin-dispute:${DISPUTE_ID}`,
+            expect.any(String),
+          ],
         ],
       ]),
     );
@@ -249,7 +255,13 @@ describe('loan dispute resolution integration flow', () => {
         ],
         [
           expect.stringContaining('DefaultReversed'),
-          expect.arrayContaining([expect.anything(), LOAN_ID, TEST_PUBLIC_KEY]),
+          [
+            expect.any(String),
+            LOAN_ID,
+            TEST_PUBLIC_KEY,
+            `admin-dispute:${DISPUTE_ID}`,
+            expect.any(String),
+          ],
         ],
       ]),
     );
