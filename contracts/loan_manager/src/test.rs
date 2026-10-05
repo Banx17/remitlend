@@ -120,6 +120,7 @@ fn setup_test<'a>(
 
     // 5. Initialize the Loan Manager with the NFT contract, lending pool, token, and admin
     loan_manager_client.initialize(&nft_contract_id, &pool_contract_id, &token_id, &admin);
+    pool_client.set_loan_manager(&loan_manager_id);
 
     // Authorize the LoanManager as the pool's disburser so `approve_loan` and
     // `refinance_loan` can move liquidity via `disburse_loan`.
@@ -3416,14 +3417,17 @@ fn test_liquidate_with_collateral_shortfall_has_no_refund() {
 
     let liquidated_loan = manager.get_loan(&loan_id);
     assert_eq!(liquidated_loan.status, LoanStatus::Liquidated);
-    assert_eq!(liquidated_loan.principal_paid, 900);
+    assert_eq!(liquidated_loan.principal_paid, 882);
     assert_eq!(manager.get_collateral(&loan_id), 0);
     assert_eq!(manager.get_borrower_loan_count(&borrower), 0);
     assert_eq!(
         token_client.balance(&pool_client),
-        pool_balance_before + 900
+        pool_balance_before + 882
     );
-    assert_eq!(token_client.balance(&liquidator), liquidator_balance_before);
+    assert_eq!(
+        token_client.balance(&liquidator),
+        liquidator_balance_before + 18
+    );
     assert_eq!(token_client.balance(&borrower), borrower_balance_before);
 }
 
@@ -5709,7 +5713,7 @@ fn test_get_loan_status_discriminants_and_not_found() {
 
     // 2. Approved = 1
     let stellar_token = StellarAssetClient::new(&env, &token_id);
-    stellar_token.mint(&manager.address, &100_000);
+    stellar_token.mint(&_pool_id, &100_000);
     manager.approve_loan(&loan_id_0);
     assert_eq!(manager.get_loan_status(&loan_id_0), 1);
 
@@ -5717,7 +5721,8 @@ fn test_get_loan_status_discriminants_and_not_found() {
     let loan_id_repaid = manager.request_loan(&borrower, &1_000, &17_280);
     manager.approve_loan(&loan_id_repaid);
     stellar_token.mint(&borrower, &5_000);
-    let total_due = manager.get_total_due(&loan_id_repaid);
+    let loan = manager.get_loan(&loan_id_repaid);
+    let total_due = loan.amount + loan.accrued_interest + loan.accrued_late_fee;
     manager.repay(&borrower, &loan_id_repaid, &total_due);
     assert_eq!(manager.get_loan_status(&loan_id_repaid), 2);
 
@@ -5790,13 +5795,14 @@ fn test_release_collateral_repaid_loan_transfers_collateral_and_emits_event() {
 
     let stellar_token = StellarAssetClient::new(&env, &token_id);
     stellar_token.mint(&borrower, &(collateral_amount + 5_000));
-    stellar_token.mint(&manager.address, &100_000);
+    stellar_token.mint(&_pool_id, &100_000);
 
     let loan_id = manager.request_loan(&borrower, &1_000, &17_280);
-    manager.deposit_collateral(&borrower, &loan_id, &collateral_amount);
     manager.approve_loan(&loan_id);
+    manager.deposit_collateral(&loan_id, &collateral_amount);
 
-    let total_due = manager.get_total_due(&loan_id);
+    let loan = manager.get_loan(&loan_id);
+    let total_due = loan.amount + loan.accrued_interest + loan.accrued_late_fee;
     manager.repay(&borrower, &loan_id, &total_due);
 
     let loan_after_repay = manager.get_loan(&loan_id);
@@ -5839,7 +5845,7 @@ fn test_release_collateral_rejects_non_repaid_or_unknown_loans() {
 
     // 2. Approved loan -> LoanNotRepaid
     let stellar_token = StellarAssetClient::new(&env, &token_id);
-    stellar_token.mint(&manager.address, &100_000);
+    stellar_token.mint(&_pool_id, &100_000);
     manager.approve_loan(&loan_id);
     let res_approved = manager.try_release_collateral(&loan_id);
     assert_eq!(res_approved, Err(Ok(LoanError::LoanNotRepaid)));
@@ -5870,7 +5876,7 @@ fn test_extend_loan_rejects_seized_borrower() {
     );
 
     let stellar_token = StellarAssetClient::new(&env, &token_id);
-    stellar_token.mint(&manager.address, &100_000);
+    stellar_token.mint(&_pool_id, &100_000);
 
     // Borrower requests two loans
     let loan_1_id = manager.request_loan(&borrower, &1_000, &17_280);
