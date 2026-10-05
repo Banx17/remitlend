@@ -48,7 +48,6 @@ pub fn emergency_withdraw(
 ///
 /// Increments `TotalYieldDistributed` storage for the token and updates `total_managed_assets`,
 /// raising the share price for all existing holders.
-#[allow(dead_code)]
 pub fn yield_distributed(env: &Env, token: Address, amount: i128) {
     if amount > 0 {
         let total = env
