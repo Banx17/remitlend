@@ -26,7 +26,7 @@ pub trait RateOracleInterface {
 pub trait LendingPoolInterface {
     fn is_paused(env: Env) -> bool;
     fn pool_balance(env: Env, token: Address) -> i128;
-    fn get_total_outstanding(env: Env, token: Address) -> i128;
+    fn adjust_outstanding(env: Env, token: Address, delta: i128);
     fn distribute_yield(env: Env, from: Address, token: Address, amount: i128);
     fn disburse_loan(env: Env, token: Address, borrower: Address, amount: i128);
 }
@@ -581,6 +581,15 @@ impl LoanManager {
 
         env.storage().instance().set(&key, &updated);
         Self::bump_instance_ttl(env);
+
+        if let Some(lending_pool) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::LendingPool)
+        {
+            let pool_client = PoolClient::new(env, &lending_pool);
+            pool_client.adjust_outstanding(token, &delta);
+        }
     }
 
     fn borrower_loan_count(env: &Env, borrower: &Address) -> u32 {
@@ -2735,6 +2744,17 @@ impl LoanManager {
         env.events()
             .publish((Symbol::new(&env, "AdminTransferred"),), proposed_admin);
         Ok(())
+    }
+
+    pub fn set_admin(env: Env, new_admin: Address) {
+        let current_admin = Self::admin(&env);
+        current_admin.require_auth();
+
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::ProposedAdmin);
+        Self::bump_instance_ttl(&env);
+        env.events()
+            .publish((Symbol::new(&env, "AdminTransferred"),), new_admin);
     }
 
     pub fn pause(env: Env) {

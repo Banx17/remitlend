@@ -1,7 +1,6 @@
 import { jest, describe, it, expect, beforeEach, afterAll } from '@jest/globals';
 import request from 'supertest';
 import { Keypair } from '@stellar/stellar-sdk';
-import { generateJwtToken } from '../services/authService.js';
 import { accrueInterest } from '../money/loanAccrual.js';
 
 /**
@@ -57,7 +56,7 @@ const mockQuery: jest.MockedFunction<
   (text: string, params?: unknown[]) => Promise<MockQueryResult>
 > = jest.fn();
 
-jest.unstable_mockModule('../db/connection.js', () => ({
+await jest.unstable_mockModule('../db/connection.js', () => ({
   default: { query: mockQuery },
   query: mockQuery,
   getClient: jest.fn(),
@@ -65,7 +64,7 @@ jest.unstable_mockModule('../db/connection.js', () => ({
   withTransaction: jest.fn(),
 }));
 
-jest.unstable_mockModule('../services/cacheService.js', () => ({
+await jest.unstable_mockModule('../services/cacheService.js', () => ({
   cacheService: {
     get: jest.fn<() => Promise<null>>().mockResolvedValue(null),
     set: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
@@ -75,7 +74,7 @@ jest.unstable_mockModule('../services/cacheService.js', () => ({
   },
 }));
 
-jest.unstable_mockModule('../services/sorobanService.js', () => ({
+await jest.unstable_mockModule('../services/sorobanService.js', () => ({
   sorobanService: {
     ping: jest.fn<() => Promise<string>>().mockResolvedValue('ok'),
     healthCheck: jest
@@ -85,6 +84,7 @@ jest.unstable_mockModule('../services/sorobanService.js', () => ({
 }));
 
 const { default: app } = await import('../app.js');
+const { generateJwtToken } = await import('../services/authService.js');
 
 const bearer = (publicKey: string) => ({
   Authorization: `Bearer ${generateJwtToken(publicKey)}`,

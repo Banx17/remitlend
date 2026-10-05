@@ -9,7 +9,7 @@ jest.unstable_mockModule('../../db/connection.js', () => ({
   query: mockQuery,
 }));
 
-const { getAuditLogs } = await import('../auditLogService.js');
+const { getAuditLogs, decodeCursor } = await import('../auditLogService.js');
 
 const PAGE_ROWS = [
   { id: '300', created_at: '2026-03-03T00:00:00.000Z' },
@@ -17,7 +17,8 @@ const PAGE_ROWS = [
   { id: '298', created_at: '2026-03-01T00:00:00.000Z' },
 ];
 
-/** Last call to query() — always the SELECT page statement. */
+/** Last SELECT page statement issued — `find` would return an earlier
+ * invocation's SQL when a test calls getAuditLogs more than once. */
 const pageQuery = () => {
   const calls = mockQuery.mock.calls.filter(
     ([text]) => typeof text === 'string' && text.includes('SELECT * FROM audit_logs'),
@@ -49,12 +50,12 @@ describe('getAuditLogs keyset pagination and totals (#1808)', () => {
     });
 
     it('pages with a (created_at, id) row comparison, not id alone', async () => {
-      await getAuditLogs({ limit: 2, cursor: '2026-03-02T00:00:00.000Z:298' });
+      await getAuditLogs({ limit: 2, cursor: '2026-03-02T00:00:00.000Z:299' });
 
       const { text, values } = pageQuery();
       expect(text).toMatch(/\(created_at, id\)\s*<\s*\(\$\d+, \$\d+\)/);
       // The cursor must be both parts, never just the id.
-      expect(values).toEqual(expect.arrayContaining(['2026-03-02T00:00:00.000Z', '298']));
+      expect(values).toEqual(expect.arrayContaining(['2026-03-02T00:00:00.000Z', '299']));
       expect(text).not.toMatch(/id\s*<\s*\$\d+\s*\n?\s*AND/);
     });
 
@@ -69,12 +70,13 @@ describe('getAuditLogs keyset pagination and totals (#1808)', () => {
 
       expect(result.nextCursor).not.toBeNull();
       // The cursor carries the timestamp *and* the id it is paging from. The
-      // ISO timestamp itself contains colons, so split on the final one.
-      const cursor = String(result.nextCursor);
-      expect(cursor).toContain(':');
-      const separatorAt = cursor.lastIndexOf(':');
-      expect(cursor.slice(0, separatorAt)).toBe('2026-03-02T00:00:00.000Z');
-      expect(cursor.slice(separatorAt + 1)).toBe('299');
+      // ISO timestamp itself contains ':', so parse it with decodeCursor
+      // rather than a naive split.
+      expect(result.nextCursor).toContain(':');
+      const decoded = decodeCursor(String(result.nextCursor));
+      expect(decoded).not.toBeNull();
+      expect(decoded?.createdAt).toBe('2026-03-02T00:00:00.000Z');
+      expect(decoded?.id).toBe('299');
     });
 
     it('returns a null cursor on the last page', async () => {
@@ -168,12 +170,14 @@ describe('getAuditLogs keyset pagination and totals (#1808)', () => {
     });
 
     it('counts an unfiltered table as a single plain query', async () => {
+      // No cursor passed, so the page query carries no keyset predicate and
+      // the count SQL is a bare COUNT with no WHERE clause.
       await getAuditLogs({ withTotal: true, limit: 2 });
 
       const countSql = String(
         mockQuery.mock.calls.find(([text]) => String(text).includes('COUNT(*)'))?.[0],
       );
-      expect(countSql).toBe('SELECT COUNT(*) as count FROM audit_logs');
+      expect(countSql.trim()).toBe('SELECT COUNT(*) as count FROM audit_logs');
     });
   });
 
@@ -205,6 +209,7 @@ describe('AuditLogFilters shape (#1808)', () => {
       limit: 1,
       withTotal: true,
     };
+    // actor, action, from, to, cursor, limit, withTotal
     expect(Object.keys(filters)).toHaveLength(7);
   });
 });
