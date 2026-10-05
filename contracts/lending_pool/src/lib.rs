@@ -1193,8 +1193,11 @@ impl LendingPool {
     }
 
     pub fn adjust_outstanding(env: Env, token: Address, delta: i128) {
-        let lending_pool = Self::admin(&env);
-        lending_pool.require_auth();
+        if let Some(lm) = Self::get_loan_manager(env.clone()) {
+            lm.require_auth();
+        } else {
+            Self::admin(&env).require_auth();
+        }
 
         if delta == 0 {
             return;
