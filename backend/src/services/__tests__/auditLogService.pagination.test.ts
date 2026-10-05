@@ -9,7 +9,7 @@ jest.unstable_mockModule('../../db/connection.js', () => ({
   query: mockQuery,
 }));
 
-const { getAuditLogs } = await import('../auditLogService.js');
+const { getAuditLogs, decodeCursor } = await import('../auditLogService.js');
 
 const PAGE_ROWS = [
   { id: '300', created_at: '2026-03-03T00:00:00.000Z' },
@@ -17,11 +17,13 @@ const PAGE_ROWS = [
   { id: '298', created_at: '2026-03-01T00:00:00.000Z' },
 ];
 
-/** The most recent call to query() matching the SELECT page statement. */
+/** Last SELECT page statement issued — `find` would return an earlier
+ * invocation's SQL when a test calls getAuditLogs more than once. */
 const pageQuery = () => {
-  const call = [...mockQuery.mock.calls]
-    .reverse()
-    .find(([text]) => typeof text === 'string' && text.includes('SELECT * FROM audit_logs'));
+  const calls = mockQuery.mock.calls.filter(
+    ([text]) => typeof text === 'string' && text.includes('SELECT * FROM audit_logs'),
+  );
+  const call = calls[calls.length - 1];
   return { text: String(call?.[0]), values: (call?.[1] as unknown[]) ?? [] };
 };
 
@@ -48,8 +50,6 @@ describe('getAuditLogs keyset pagination and totals (#1808)', () => {
     });
 
     it('pages with a (created_at, id) row comparison, not id alone', async () => {
-      // Resume from the first page's last row (2026-03-02T00:00:00.000Z:299)
-      // so the keyset predicate is actually built.
       await getAuditLogs({ limit: 2, cursor: '2026-03-02T00:00:00.000Z:299' });
 
       const { text, values } = pageQuery();
@@ -69,14 +69,14 @@ describe('getAuditLogs keyset pagination and totals (#1808)', () => {
       const result = await getAuditLogs({ limit: 2 });
 
       expect(result.nextCursor).not.toBeNull();
-      // The cursor carries the timestamp *and* the id it is paging from.
-      expect(result.nextCursor).toContain(':');
       // The cursor carries the timestamp *and* the id it is paging from. The
-      // timestamp is an ISO string containing ':' itself, so split on the last
-      // separator only.
-      const separatorAt = String(result.nextCursor).lastIndexOf(':');
-      expect(String(result.nextCursor).slice(0, separatorAt)).toBe('2026-03-02T00:00:00.000Z');
-      expect(String(result.nextCursor).slice(separatorAt + 1)).toBe('299');
+      // ISO timestamp itself contains ':', so parse it with decodeCursor
+      // rather than a naive split.
+      expect(result.nextCursor).toContain(':');
+      const decoded = decodeCursor(String(result.nextCursor));
+      expect(decoded).not.toBeNull();
+      expect(decoded?.createdAt).toBe('2026-03-02T00:00:00.000Z');
+      expect(decoded?.id).toBe('299');
     });
 
     it('returns a null cursor on the last page', async () => {
@@ -209,6 +209,7 @@ describe('AuditLogFilters shape (#1808)', () => {
       limit: 1,
       withTotal: true,
     };
+    // actor, action, from, to, cursor, limit, withTotal
     expect(Object.keys(filters)).toHaveLength(7);
   });
 });
