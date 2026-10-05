@@ -569,6 +569,7 @@ impl RemittanceNFT {
         recipient_commitment: BytesN<32>,
         minter: Option<Address>,
     ) -> Result<(), NftError> {
+        Self::assert_not_paused(&env)?;
         let _admin_direct_mint = minter.is_none();
         Self::require_admin_or_authorized_minter(&env, minter)?;
 
@@ -763,6 +764,7 @@ impl RemittanceNFT {
         repayment_amount: i128,
         minter: Option<Address>,
     ) -> Result<(), NftError> {
+        Self::assert_not_paused(&env)?;
         if repayment_amount <= 0 {
             return Err(NftError::InvalidRepaymentAmount);
         }
@@ -852,7 +854,13 @@ impl RemittanceNFT {
 
         let old_score = metadata.score;
         let decreased = old_score.saturating_sub(penalty_points);
-        let new_score = decreased.max(Self::MIN_CREDIT_SCORE);
+        // Apply the MIN_CREDIT_SCORE floor only to scores that are already at
+        // or above it, then clamp to `old_score` so a penalty can never raise
+        // a score. Without the `.min(old_score)`, a user sitting below the
+        // floor (reachable via `apply_score_delta`/legacy state) would be
+        // bumped *up* to 300 by a penalty — laundering a low score upward and
+        // improving their lending eligibility (#1141).
+        let new_score = decreased.max(Self::MIN_CREDIT_SCORE).min(old_score);
         if new_score == old_score {
             return Ok(());
         }
@@ -876,6 +884,7 @@ impl RemittanceNFT {
         delta: i32,
         minter: Option<Address>,
     ) -> Result<(), NftError> {
+        Self::assert_not_paused(&env)?;
         Self::require_admin_or_authorized_minter(&env, minter)?;
 
         let metadata_key = DataKey::Metadata(user.clone());
@@ -1016,6 +1025,7 @@ impl RemittanceNFT {
     }
 
     pub fn burn(env: Env, user: Address, minter: Option<Address>) -> Result<(), NftError> {
+        Self::assert_not_paused(&env)?;
         Self::require_admin_or_authorized_minter(&env, minter)?;
 
         if !Self::has_active_nft(&env, &user) {
@@ -1033,6 +1043,7 @@ impl RemittanceNFT {
         to: Address,
         minter: Option<Address>,
     ) -> Result<(), NftError> {
+        Self::assert_not_paused(&env)?;
         if from == to {
             return Err(NftError::SelfTransfer);
         }
