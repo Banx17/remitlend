@@ -2178,13 +2178,20 @@ impl LoanManager {
             .expect("lending pool not set");
         let token_client = TokenClient::new(&env, &token);
 
-        // Transfer accrued interest + late fees from borrower to lending pool before resetting.
+        // Collect accrued interest + late fees from borrower before resetting.
+        // Routed through `distribute_yield` so the settlement is recognized in
+        // the pool's `total_managed_assets` (and share price); a bare transfer
+        // to the pool is ignored for pricing and would strand LP earnings (#1795).
         let accrued_settlement = loan
             .accrued_interest
             .checked_add(loan.accrued_late_fee)
             .expect("overflow");
         if accrued_settlement > 0 {
-            token_client.transfer(&loan.borrower, &lending_pool, &accrued_settlement);
+            PoolClient::new(&env, &lending_pool).distribute_yield(
+                &loan.borrower,
+                &token,
+                &accrued_settlement,
+            );
         }
 
         loan.interest_paid = loan
