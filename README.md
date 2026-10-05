@@ -8,6 +8,8 @@
 
 RemitLend treats remittance history as credit history. Migrant workers prove their financial reliability through monthly cross-border transfers, allowing them to receive fair loans without predatory fees. In return, lenders earn transparent yield powered by the Stellar network.
 
+12
+
 ## ✨ Key Features
 
 ### For Borrowers
