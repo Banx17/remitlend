@@ -141,6 +141,7 @@ const bearerWithScopes = (publicKey: string, scopes: string[]) => ({
 beforeEach(() => {
   mockedQuery.mockReset();
   jest.clearAllMocks();
+  fakeCacheStore.clear();
 });
 
 afterAll(() => {
