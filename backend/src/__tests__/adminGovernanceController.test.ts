@@ -36,6 +36,7 @@ describe('adminGovernanceController - getPendingGovernance', () => {
     delete process.env.GOVERNANCE_CURRENT_ADMIN;
     delete process.env.MULTISIG_GOVERNANCE_CONTRACT_ID;
     delete process.env.GOVERNANCE_THRESHOLD;
+    delete process.env.GOVERNANCE_SIGNERS;
   });
 
   it('filters signers so signers from older pending proposals are not mixed in', async () => {

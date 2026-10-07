@@ -7,26 +7,71 @@ use soroban_sdk::{
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum NftError {
+    /// Returned by `initialize` when the contract has already been initialized
+    /// (the `ADMIN` instance key is already present).
     AlreadyInitialized = 1,
+    /// Returned by any function that reads `Self::admin` when the contract has
+    /// not yet been initialized (the `ADMIN` instance key is missing).
     NotInitialized = 2,
+    /// Returned by `require_admin_or_authorized_minter` when a `minter` address
+    /// was supplied but is not present in the authorized-minter set.
     UnauthorizedMinter = 3,
+    /// Returned by `mint` (and `admin_remint`) when the target user already has
+    /// an active `Metadata` or legacy `Score` entry.
     NftAlreadyExists = 4,
+    /// Returned by `mint` and `transfer` when the target address has the
+    /// `Burned` flag set; recovery requires `approve_remint` + `admin_remint`.
     BurnedRequiresApproval = 5,
+    /// Returned when the referenced user has no active NFT (no `Metadata` or
+    /// legacy `Score` entry). Emitted by `update_metadata_uri`,
+    /// `update_score`, `apply_score_delta`, `update_history_hash`,
+    /// `seize_collateral`, `burn`, `transfer`, `admin_remint`, and
+    /// `get_recipient_commitment` (via `CommitmentMissing`).
     NftNotFound = 6,
+    /// Returned by `update_score` when `repayment_amount <= 0` or when the
+    /// amount is below `MIN_SCORE_UPDATE_REPAYMENT` (dust that would award
+    /// zero points but still incur storage writes and events).
     InvalidRepaymentAmount = 7,
+    /// Returned by `seize_collateral` when the `Seized` flag is already set
+    /// for the user.
     CollateralAlreadySeized = 8,
+    /// Returned by `transfer` when `from == to`.
     SelfTransfer = 9,
+    /// Returned by `transfer` when the destination address already has any
+    /// remittance state (`Metadata`, legacy `Score`, or `RecipientCommitment`).
     DestinationOccupied = 10,
+    /// Returned by `transfer` when the sender's `TransferCooldown` ledger has
+    /// not yet elapsed.
     TransferCooldownActive = 11,
+    /// Returned by `set_default_burn_threshold` when the threshold is `0` or
+    /// exceeds `MAX_ALLOWED_BURN_THRESHOLD`.
     InvalidThreshold = 12,
+    /// Returned by `assert_not_paused` (and thus by any gated entrypoint) when
+    /// the contract `Paused` flag is set.
     ContractPaused = 13,
+    /// Returned by `update_history_hash` when the new hash is all-zero or
+    /// identical to the currently stored hash.
     InvalidHistoryHash = 14,
+    /// Returned by `accept_admin` when no `ProposedAdmin` has been set.
     NoProposedAdmin = 15,
+    /// Returned by `admin_remint` when the one-time `RemintApproval` flag has
+    /// not been set via `approve_remint`.
     RemintNotApproved = 16,
+    /// Returned by `update_score` when `repayment_amount` is positive and
+    /// above `MIN_SCORE_UPDATE_REPAYMENT` but below the admin-configured
+    /// `MinRepaymentAmount` floor.
     BelowMinimum = 17,
+    /// Returned by `validate_metadata_uri` when the supplied URI is shorter
+    /// than 8 bytes.
     InvalidMetadataUri = 18,
+    /// Returned by `authorize_minter` when the authorized-minter set is at
+    /// `MAX_AUTHORIZED_MINTERS`.
     MinterLimitReached = 19,
+    /// Returned by `mint` and `admin_remint` when `recipient_commitment` is
+    /// not exactly 32 bytes.
     CommitmentMalformed = 20,
+    /// Returned by `get_recipient_commitment` when no `RecipientCommitment`
+    /// entry exists for the user.
     CommitmentMissing = 21,
     /// Returned by `transfer` when the sender has one or more active loans
     /// (Pending or Approved) in the registered LoanManager.  Borrowers must
@@ -820,10 +865,9 @@ impl RemittanceNFT {
             Self::get_or_migrate_metadata(&env, &user).ok_or(NftError::NftNotFound)?;
 
         // Simple logic: 1 point per 100 tokens of repayment (scaled for stroops).
+        // MIN_SCORE_UPDATE_REPAYMENT guarantees repayment_amount >= POINTS_DENOMINATOR,
+        // so points_i128 is always >= 1 from here on.
         let points_i128 = repayment_amount / Self::POINTS_DENOMINATOR;
-        if points_i128 == 0 {
-            return Ok(());
-        }
         let points = if points_i128 > (Self::MAX_SCORE as i128) {
             Self::MAX_SCORE
         } else {
@@ -847,15 +891,37 @@ impl RemittanceNFT {
         Ok(())
     }
 
+    /// Update the minimum repayment amount accepted by `update_score`.
+    ///
+    /// Emits a `MinRepaymentUpdated` event carrying both the previous and the
+    /// new amount (#1146) so this risk-parameter change is observable off-chain
+    /// by the indexer and by audit trails.
+    ///
+    /// Keeps the typed-error contract introduced on `main` (#1843): a negative
+    /// amount is rejected with `NftError::InvalidAmount` rather than panicking.
     pub fn set_min_repayment_amount(env: Env, amount: i128) -> Result<(), NftError> {
-        Self::admin(&env).require_auth();
+        // Hoisted so the already-read admin can be reused as the event's actor
+        // topic. Evaluation order is unchanged: `admin()` is read before
+        // `require_auth()`, exactly as it was when inlined.
+        let admin = Self::admin(&env);
+        admin.require_auth();
         if amount < 0 {
             return Err(NftError::InvalidAmount);
         }
+        // Capture the outgoing value before the overwrite so the event reports
+        // the full old -> new transition rather than just the new value.
+        let old_amount = Self::min_repayment_amount(&env);
         env.storage()
             .instance()
             .set(&DataKey::MinRepaymentAmount, &amount);
         Self::bump_instance_ttl(&env);
+        // Topics `(event, admin)` and data `(old, new)` follow the admin
+        // config-update convention used by loan_manager/lending_pool so the
+        // existing indexer decoding of `MinRepaymentUpdated` applies as-is.
+        env.events().publish(
+            (Symbol::new(&env, "MinRepaymentUpdated"), admin),
+            (old_amount, amount),
+        );
         Ok(())
     }
 
@@ -1261,17 +1327,36 @@ impl RemittanceNFT {
         Ok(())
     }
 
+    /// Update the number of defaults after which an NFT is auto-burned.
+    ///
+    /// Emits a `DefaultBurnThresholdUpdated` event carrying both the previous
+    /// and the new threshold (#1146) so this risk-parameter change is
+    /// observable off-chain by the indexer and by audit trails.
     pub fn set_default_burn_threshold(env: Env, threshold: u32) -> Result<(), NftError> {
         if threshold == 0 || threshold > Self::MAX_ALLOWED_BURN_THRESHOLD {
             return Err(NftError::InvalidThreshold);
         }
-        Self::admin(&env).require_auth();
+        // Hoisted so the already-read admin can be reused as the event's actor
+        // topic. Evaluation order is unchanged: `admin()` is read before
+        // `require_auth()`, exactly as it was when inlined.
+        let admin = Self::admin(&env);
+        admin.require_auth();
         Self::assert_not_paused(&env)?;
 
+        // Capture the outgoing value before the overwrite so the event reports
+        // the full old -> new transition rather than just the new value.
+        let old_threshold = Self::default_burn_threshold(&env);
         env.storage()
             .instance()
             .set(&Self::burn_threshold_key(), &threshold);
         Self::bump_instance_ttl(&env);
+
+        // Topics `(event, admin)` and data `(old, new)` follow the admin
+        // config-update convention used by loan_manager/lending_pool.
+        env.events().publish(
+            (Symbol::new(&env, "DefaultBurnThresholdUpdated"), admin),
+            (old_threshold, threshold),
+        );
 
         Ok(())
     }
