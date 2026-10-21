@@ -161,6 +161,7 @@ pub struct PendingTransfer {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct AdminTransferProposedEvent {
+    pub proposal_id: u32,
     pub proposed_admin: Address,
     pub signers: Vec<Address>,
     pub threshold: u32,
@@ -173,6 +174,7 @@ pub struct AdminTransferProposedEvent {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct AdminTransferFinalizedEvent {
+    pub proposal_id: u32,
     pub new_admin: Address,
     pub finalized_by: Address,
     pub approval_count: u32,
@@ -183,6 +185,7 @@ pub struct AdminTransferFinalizedEvent {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct AdminTransferCancelledEvent {
+    pub proposal_id: u32,
     pub cancelled_by: Address,
     pub timestamp: u64,
 }
@@ -212,6 +215,7 @@ pub struct ProposalApprovedEvent {
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct ProposalExpiredEvent {
+    pub proposal_id: u32,
     pub expired_by: Address,
     pub proposal_timestamp: u64,
     pub expiry_timestamp: u64,
@@ -386,6 +390,7 @@ impl GovernanceContract {
         env.events().publish(
             (symbol_short!("GovProp"), admin.clone()),
             AdminTransferProposedEvent {
+                proposal_id,
                 proposed_admin,
                 signers,
                 threshold,
@@ -514,6 +519,7 @@ impl GovernanceContract {
         env.events().publish(
             (symbol_short!("GovFin"), new_admin.clone()),
             AdminTransferFinalizedEvent {
+                proposal_id: pending.id,
                 new_admin,
                 finalized_by: caller,
                 approval_count,
@@ -569,6 +575,7 @@ impl GovernanceContract {
         env.events().publish(
             (symbol_short!("GovCncl"), admin.clone()),
             AdminTransferCancelledEvent {
+                proposal_id: pending.id,
                 cancelled_by: admin,
                 timestamp: env.ledger().timestamp(),
             },
@@ -653,6 +660,7 @@ impl GovernanceContract {
         env.events().publish(
             (symbol_short!("GovExp"), caller.clone()),
             ProposalExpiredEvent {
+                proposal_id: pending.id,
                 expired_by: caller,
                 proposal_timestamp: pending.proposed_at,
                 expiry_timestamp: now,
@@ -711,6 +719,9 @@ impl GovernanceContract {
             .instance()
             .get(&KEY_PENDING)
             .ok_or(GovernanceError::NoPendingTransfer)?;
+        if pending.status != ProposalStatus::Active {
+            return Err(GovernanceError::NoPendingTransfer);
+        }
         Ok(pending.approvals.len())
     }
 
@@ -725,6 +736,9 @@ impl GovernanceContract {
         {
             None => 0,
             Some(p) => {
+                if p.status != ProposalStatus::Active {
+                    return 0;
+                }
                 let now = env.ledger().timestamp();
                 if now >= p.executable_after {
                     0
@@ -750,6 +764,9 @@ impl GovernanceContract {
             .instance()
             .get(&KEY_PENDING)
             .ok_or(GovernanceError::NoPendingTransfer)?;
+        if pending.status != ProposalStatus::Active {
+            return Err(GovernanceError::NoPendingTransfer);
+        }
         Ok(pending.signers)
     }
 
@@ -760,6 +777,9 @@ impl GovernanceContract {
             .instance()
             .get(&KEY_PENDING)
             .ok_or(GovernanceError::NoPendingTransfer)?;
+        if pending.status != ProposalStatus::Active {
+            return Err(GovernanceError::NoPendingTransfer);
+        }
         Ok(pending.threshold)
     }
 
@@ -770,6 +790,9 @@ impl GovernanceContract {
             .instance()
             .get(&KEY_PENDING)
             .ok_or(GovernanceError::NoPendingTransfer)?;
+        if pending.status != ProposalStatus::Active {
+            return Err(GovernanceError::NoPendingTransfer);
+        }
         Ok(pending.approvals.get(signer).unwrap_or(false))
     }
 
