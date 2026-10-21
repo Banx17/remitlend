@@ -21,7 +21,8 @@
     "_migrations_note": "Single source of truth: backend/migrations/*.js (node-pg-migrate). Do NOT add .sql files to src/db/ — they are not executed by any script.",
     "seed": "npm run seed:dev",
     "seed:dev": "tsx src/seed/index.ts",
-    "seed:reset": "tsx src/seed/index.ts --reset"
+    "seed:reset": "tsx src/seed/index.ts --reset",
+    "pii:backfill": "tsx src/scripts/encryptUserProfilePii.ts"
   },
   "keywords": [],
   "author": "",

@@ -1,25 +1,34 @@
 import { jest, describe, it, expect, beforeAll, afterAll, beforeEach } from '@jest/globals';
-import { encryptField, decryptField, maskValue } from '../piiCrypto.js';
-import { pool } from '../../db/connection.js';
+
+type QueryResult = { rows: unknown[]; rowCount: number };
+
+const mockQuery = jest.fn<() => Promise<QueryResult>>(async () => ({ rows: [], rowCount: 1 }));
+
+// The audit trail is written through the shared `query` helper, so the
+// database module is mocked instead of the (real) pool.
+await jest.unstable_mockModule('../../db/connection.js', () => ({
+  default: { query: mockQuery },
+  query: mockQuery,
+  pool: { query: mockQuery },
+  getClient: jest.fn(),
+  withTransaction: jest.fn(),
+}));
+
+const { encryptField, decryptField, maskValue } = await import('../piiCrypto.js');
 
 describe('piiCrypto', () => {
   const testKekKey = '0'.repeat(64);
-  let mockQuery: ReturnType<typeof jest.spyOn>;
 
   beforeAll(() => {
     process.env.PII_KEK_KEY = testKekKey;
     process.env.PII_KEK_ID = 'test-kek';
     process.env.LOG_REDACTION = 'strict';
-    mockQuery = jest.spyOn(pool, 'query').mockImplementation(async () => {
-      return { rows: [], rowCount: 1 } as unknown as ReturnType<typeof pool.query>;
-    });
   });
 
   afterAll(() => {
     delete process.env.PII_KEK_KEY;
     delete process.env.PII_KEK_ID;
     delete process.env.LOG_REDACTION;
-    mockQuery.mockRestore();
   });
 
   beforeEach(() => {

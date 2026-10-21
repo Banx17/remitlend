@@ -4,6 +4,8 @@ import { jest } from '@jest/globals';
 type MockQueryResult = { rows: unknown[]; rowCount?: number };
 
 process.env.JWT_SECRET = 'test-jwt-secret-min-32-chars-long!!';
+process.env.PII_KEK_KEY = '0'.repeat(64);
+process.env.PII_KEK_ID = 'test-kek';
 
 const mockQuery: jest.MockedFunction<
   (text: string, params?: unknown[]) => Promise<MockQueryResult>
@@ -171,7 +173,12 @@ describe('updateNotificationPreferences upsert', () => {
     const [sql, params] = mockQuery.mock.calls[0]!;
     expect(sql).toMatch(/INSERT INTO user_profiles/);
     expect(sql).toMatch(/ON CONFLICT \(public_key\) DO UPDATE/);
-    expect(params).toEqual(['GNEWUSER', true, false, null]);
+    // The phone number is envelope encrypted and the legacy plaintext column
+    // is cleared, so only the KEK id is stored in cleartext (#1828).
+    expect(sql).toMatch(/phone = NULL/);
+    expect(sql).toMatch(/phone_ciphertext/);
+    expect(params?.slice(0, 3)).toEqual(['GNEWUSER', true, false]);
+    expect(params?.slice(3)).toEqual([null, null, null, null]);
     expect(result.emailEnabled).toBe(true);
   });
 });

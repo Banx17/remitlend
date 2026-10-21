@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { pool } from '../db/connection.js';
+import { query } from '../db/connection.js';
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
@@ -102,7 +102,7 @@ async function logPiiAccess(
   reason: string,
   requestId: string,
 ): Promise<void> {
-  await pool.query(
+  await query(
     `INSERT INTO pii_access_log (id, actor, record_id, field, reason, request_id, created_at)
      VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, NOW())`,
     [actor, recordId, field, reason, requestId],

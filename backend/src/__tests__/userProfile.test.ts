@@ -3,8 +3,20 @@ import jwt from 'jsonwebtoken';
 import request from 'supertest';
 
 process.env.JWT_SECRET = 'user-profile-test-secret';
+process.env.PII_KEK_KEY = '0'.repeat(64);
+process.env.PII_KEK_ID = 'test-kek';
 
 const queryMock = jest.fn<
+  () => Promise<{
+    rows: unknown[];
+    rowCount: number;
+    command: string;
+    oid: number;
+    fields: unknown[];
+  }>
+>();
+
+const poolQueryMock = jest.fn<
   () => Promise<{
     rows: unknown[];
     rowCount: number;
@@ -19,6 +31,9 @@ jest.unstable_mockModule('../db/connection.js', () => ({
     query: queryMock,
   },
   query: queryMock,
+  pool: {
+    query: poolQueryMock,
+  },
   getClient: jest.fn(),
   withTransaction: jest.fn(),
 }));
@@ -152,10 +167,20 @@ describe('/user/profile', () => {
       locale: 'en-US',
       avatarUrl: 'https://example.com/avatar.png',
     });
-    expect(queryMock).toHaveBeenLastCalledWith(
-      expect.stringContaining('UPDATE user_profiles'),
-      expect.arrayContaining(['Ada Lovelace', 'ada@example.com', '+15551234567', publicKey]),
-    );
+
+    // The e-mail address and the phone number must never be persisted in
+    // cleartext: they are stored as an envelope encrypted ciphertext and the
+    // legacy plaintext columns are cleared (#1828).
+    const [sql, params] = queryMock.mock.calls.at(-1) as [string, unknown[]];
+    expect(sql).toContain('UPDATE user_profiles');
+    expect(sql).toContain('email_ciphertext = $2');
+    expect(sql).toContain('phone_ciphertext = $6');
+    expect(sql).toContain('email = NULL');
+    expect(sql).toContain('phone = NULL');
+    expect(params).toContain('Ada Lovelace');
+    expect(params).toContain(publicKey);
+    expect(params).not.toContain('ada@example.com');
+    expect(params).not.toContain('+15551234567');
   });
 
   it('rejects invalid patch payloads', async () => {
