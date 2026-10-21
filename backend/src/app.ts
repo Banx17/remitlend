@@ -264,7 +264,7 @@ app.get(
           ? ('degraded' as const)
           : ('ok' as const);
 
-    const anyDown = db === 'down' || redis === 'down' || stellarRpc === 'down';
+    const anyDown = db === 'down' || redis === 'down' || stellarRpc === 'down' || indexerStatus === 'down';
     const overallStatus = anyDown ? 'down' : indexerStatus === 'degraded' ? 'degraded' : 'ok';
 
     res.status(anyDown ? 503 : 200).json({
@@ -314,6 +314,8 @@ app.use('/api/v1/pool', poolRoutes);
 app.use('/api/v1/notifications', notificationsRoutes);
 app.use('/api/v1/events', eventRoutes);
 app.use('/user', userRoutes);
+app.use('/api/user', userRoutes);
+app.use('/api/v1/user', userRoutes);
 
 mountSwaggerDocs(app);
 
