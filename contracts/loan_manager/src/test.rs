@@ -3390,6 +3390,156 @@ fn test_oracle_rate_above_max_falls_back_to_default() {
     assert_eq!(loan.interest_rate_bps, 1200);
 }
 
+// ── Issue #1297: the oracle bounds guard must be reachable ─────────────────
+//
+// The guard that rejects an out-of-band oracle rate used to be written as a
+// conjunction (`rate < min && rate > max`), which is unsatisfiable for a
+// well-ordered band and therefore never rejected anything: the fallback
+// branch was dead code and a stale/compromised oracle could hand out a
+// zero-rate (free) loan or an extreme rate. These tests pin the reachable
+// behaviour of the guard so the regression cannot come back.
+
+#[test]
+fn test_issue_1297_oracle_rate_zero_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (manager, nft_client, pool_client, token_id, _admin) = setup_test(&env);
+    let borrower = Address::generate(&env);
+
+    let history_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    nft_client.mint(
+        &borrower,
+        &600,
+        &history_hash,
+        &String::from_str(&env, "ipfs://QmTest"),
+        &create_test_commitment(&env, 1),
+        &None,
+    );
+    let stellar_token = StellarAssetClient::new(&env, &token_id);
+    stellar_token.mint(&pool_client, &10_000);
+
+    // A compromised oracle offering a free loan (rate = 0).
+    let oracle_id = env.register(MockRateOracle, ());
+    let oracle_client = MockRateOracleClient::new(&env, &oracle_id);
+    oracle_client.set_rate(&0);
+
+    manager.set_rate_oracle(&oracle_id);
+    manager.set_min_rate_bps(&1);
+
+    let loan_id = manager.request_loan(&borrower, &1000, &17280);
+    let loan = manager.get_loan(&loan_id);
+
+    // The zero rate must be rejected and replaced by the configured default.
+    assert_eq!(loan.interest_rate_bps, 1200);
+}
+
+#[test]
+fn test_issue_1297_oracle_rate_at_min_bound_is_accepted() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (manager, nft_client, pool_client, token_id, _admin) = setup_test(&env);
+    let borrower = Address::generate(&env);
+
+    let history_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    nft_client.mint(
+        &borrower,
+        &600,
+        &history_hash,
+        &String::from_str(&env, "ipfs://QmTest"),
+        &create_test_commitment(&env, 1),
+        &None,
+    );
+    let stellar_token = StellarAssetClient::new(&env, &token_id);
+    stellar_token.mint(&pool_client, &10_000);
+
+    let oracle_id = env.register(MockRateOracle, ());
+    let oracle_client = MockRateOracleClient::new(&env, &oracle_id);
+    oracle_client.set_rate(&500);
+
+    manager.set_rate_oracle(&oracle_id);
+    manager.set_min_rate_bps(&500);
+
+    let loan_id = manager.request_loan(&borrower, &1000, &17280);
+    let loan = manager.get_loan(&loan_id);
+
+    // The band is inclusive: a rate exactly at the floor is in bounds.
+    assert_eq!(loan.interest_rate_bps, 500);
+}
+
+#[test]
+fn test_issue_1297_oracle_rate_at_max_bound_is_accepted() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (manager, nft_client, pool_client, token_id, _admin) = setup_test(&env);
+    let borrower = Address::generate(&env);
+
+    let history_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    nft_client.mint(
+        &borrower,
+        &600,
+        &history_hash,
+        &String::from_str(&env, "ipfs://QmTest"),
+        &create_test_commitment(&env, 1),
+        &None,
+    );
+    let stellar_token = StellarAssetClient::new(&env, &token_id);
+    stellar_token.mint(&pool_client, &10_000);
+
+    let oracle_id = env.register(MockRateOracle, ());
+    let oracle_client = MockRateOracleClient::new(&env, &oracle_id);
+    oracle_client.set_rate(&2_000);
+
+    manager.set_rate_oracle(&oracle_id);
+    manager.set_max_rate_bps(&2_000);
+
+    let loan_id = manager.request_loan(&borrower, &1000, &17280);
+    let loan = manager.get_loan(&loan_id);
+
+    // The band is inclusive: a rate exactly at the ceiling is in bounds.
+    assert_eq!(loan.interest_rate_bps, 2_000);
+}
+
+#[test]
+fn test_issue_1297_oracle_rate_just_outside_bounds_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (manager, nft_client, pool_client, token_id, _admin) = setup_test(&env);
+    let borrower = Address::generate(&env);
+
+    let history_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    nft_client.mint(
+        &borrower,
+        &600,
+        &history_hash,
+        &String::from_str(&env, "ipfs://QmTest"),
+        &create_test_commitment(&env, 1),
+        &None,
+    );
+    let stellar_token = StellarAssetClient::new(&env, &token_id);
+    stellar_token.mint(&pool_client, &10_000);
+
+    let oracle_id = env.register(MockRateOracle, ());
+    let oracle_client = MockRateOracleClient::new(&env, &oracle_id);
+
+    manager.set_rate_oracle(&oracle_id);
+    manager.set_min_rate_bps(&500);
+    manager.set_max_rate_bps(&2_000);
+
+    // One BPS below the floor.
+    oracle_client.set_rate(&499);
+    let below_id = manager.request_loan(&borrower, &1000, &17280);
+    assert_eq!(manager.get_loan(&below_id).interest_rate_bps, 1200);
+
+    // One BPS above the ceiling.
+    oracle_client.set_rate(&2_001);
+    let above_id = manager.request_loan(&borrower, &1000, &17280);
+    assert_eq!(manager.get_loan(&above_id).interest_rate_bps, 1200);
+}
+
 #[test]
 fn test_rate_bounds_persist_across_operations() {
     let env = Env::default();
