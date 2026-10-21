@@ -808,6 +808,7 @@ name = "money"
 version = "0.0.1"
 dependencies = [
  "rand",
+ "serde_json",
  "soroban-sdk",
 ]
 

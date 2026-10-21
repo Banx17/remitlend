@@ -9,6 +9,7 @@
 //! root and `scripts/gen-money.ts`).
 #![no_std]
 
+pub mod accrual;
 pub mod policy;
 
 use soroban_sdk::{contracterror, Env, Vec};

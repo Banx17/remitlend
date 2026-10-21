@@ -41,6 +41,7 @@
 //! | `MinRateBpsUpdated` | `("MinRateBpsUpdated", admin: Address)` | `(old_rate: u32, new_rate: u32)` |
 //! | `MaxRateBpsUpdated` | `("MaxRateBpsUpdated", admin: Address)` | `(old_rate: u32, new_rate: u32)` |
 //! | `LoanPurged` | `("LoanPurged",)` | `loan_id: u32` |
+//! | `accrue` | `("accrue", loan_id: u32)` | `(index: i128, index_delta: i128, interest_delta: i128, residual: i128)` |
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol};
 
@@ -407,4 +408,26 @@ pub fn max_rate_bps_updated(env: &Env, admin: Address, old_rate: u32, new_rate: 
 pub fn loan_purged(env: &Env, loan_id: u32) {
     let topics = (Symbol::new(env, "LoanPurged"),);
     env.events().publish(topics, loan_id);
+}
+
+/// Emits event when a loan's interest window is accrued.
+///
+/// The payload carries everything an indexer needs to reproduce the window
+/// off-chain: the loan's cumulative accrual index, the index delta of the
+/// window, the interest the window produced and the sub-stroop residual
+/// that was carried into the next window (#1382).
+///
+/// - **Topics**: `("accrue", loan_id: u32)`
+/// - **Data**: `(index: i128, index_delta: i128, interest_delta: i128, residual: i128)`
+pub fn accrue(
+    env: &Env,
+    loan_id: u32,
+    index: i128,
+    index_delta: i128,
+    interest_delta: i128,
+    residual: i128,
+) {
+    let topics = (Symbol::new(env, "accrue"), loan_id);
+    env.events()
+        .publish(topics, (index, index_delta, interest_delta, residual));
 }
