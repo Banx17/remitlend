@@ -96,6 +96,9 @@ stricter rate limit (10 requests/minute/IP) to prevent abuse.
 | `TWILIO_ACCOUNT_SID` | — | ✓ | ✓ | — | Twilio account SID for SMS | `backend/src/services/smsService.ts` |
 | `TWILIO_AUTH_TOKEN` | — | ✓ | ✓ | — | Twilio auth token | `backend/src/services/smsService.ts` |
 | `TWILIO_PHONE_NUMBER` | — | ✓ | ✓ | — | Twilio sender phone number | `backend/src/services/smsService.ts` |
+| `PII_KMS_ENDPOINT` | — | ✓ | ✓ | — | KMS endpoint that wraps/unwrap the data encryption keys of the PII envelope. Either this or `PII_KEK_KEY` must be set. | `backend/src/services/piiCrypto.ts` |
+| `PII_KEK_KEY` | ✓ | — | — | — | Local key encryption key (32 bytes, hex encoded) that wraps the data encryption keys of the PII envelope. Either this or `PII_KMS_ENDPOINT` must be set. | `backend/src/services/piiCrypto.ts` |
+| `PII_KEK_ID` | — | ✓ | ✓ | `default-kek` | Identifier of the key encryption key that is recorded with every encrypted PII field | `backend/src/services/piiCrypto.ts` |
 
 ---
 

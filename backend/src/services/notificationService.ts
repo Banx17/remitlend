@@ -2,6 +2,7 @@ import { query } from '../db/connection.js';
 import logger from '../utils/logger.js';
 import { escapeHtml } from '../utils/escapeHtml.js';
 import type { Response } from 'express';
+import { encryptPiiValue, readPiiValue, type UserProfilePiiRow } from './userProfilePii.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -189,6 +190,7 @@ class NotificationService {
   async getNotificationPreferences(userId: string): Promise<NotificationPreferences> {
     const result = await query(
       `SELECT up.email_enabled, up.sms_enabled, up.phone,
+             up.phone_ciphertext, up.phone_gcm_nonce, up.phone_dek_wrapped, up.phone_dek_kek_id,
              unp.per_type_overrides
        FROM user_profiles up
        LEFT JOIN user_notification_preferences unp
@@ -211,7 +213,12 @@ class NotificationService {
     return {
       emailEnabled: Boolean(row.email_enabled),
       smsEnabled: Boolean(row.sms_enabled),
-      phone: (row.phone as string | null) ?? null,
+      phone: await readPiiValue(row as UserProfilePiiRow, 'phone', {
+        recordId: userId,
+        actor: userId,
+        reason: 'notification preferences read by owner',
+        requestId: 'notification-preferences',
+      }),
       perTypeOverrides: (row.per_type_overrides as Record<string, boolean>) ?? {},
     };
   }
@@ -223,22 +230,44 @@ class NotificationService {
       'emailEnabled' | 'smsEnabled' | 'phone' | 'perTypeOverrides'
     >,
   ): Promise<NotificationPreferences> {
+    // The phone number is PII: it is stored as an envelope encrypted
+    // ciphertext and the legacy plaintext column is cleared (#1828).
+    const phone = payload.phone ? await encryptPiiValue(payload.phone) : null;
+
     const result = await query(
-      `INSERT INTO user_profiles (public_key, email_enabled, sms_enabled, phone)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO user_profiles (public_key, email_enabled, sms_enabled, phone,
+                                  phone_ciphertext, phone_gcm_nonce, phone_dek_wrapped, phone_dek_kek_id)
+       VALUES ($1, $2, $3, NULL, $4, $5, $6, $7)
        ON CONFLICT (public_key) DO UPDATE
        SET email_enabled = EXCLUDED.email_enabled,
            sms_enabled = EXCLUDED.sms_enabled,
-           phone = EXCLUDED.phone,
+           phone = NULL,
+           phone_ciphertext = EXCLUDED.phone_ciphertext,
+           phone_gcm_nonce = EXCLUDED.phone_gcm_nonce,
+           phone_dek_wrapped = EXCLUDED.phone_dek_wrapped,
+           phone_dek_kek_id = EXCLUDED.phone_dek_kek_id,
            updated_at = current_timestamp
-       RETURNING email_enabled, sms_enabled, phone`,
-      [userId, payload.emailEnabled, payload.smsEnabled, payload.phone],
+       RETURNING email_enabled, sms_enabled, phone,
+                 phone_ciphertext, phone_gcm_nonce, phone_dek_wrapped, phone_dek_kek_id`,
+      [
+        userId,
+        payload.emailEnabled,
+        payload.smsEnabled,
+        phone?.ciphertext ?? null,
+        phone?.gcm_nonce ?? null,
+        phone?.dek_wrapped ?? null,
+        phone?.dek_kek_id ?? null,
+      ],
     );
 
     const row = result.rows[0] ?? {
       email_enabled: payload.emailEnabled,
       sms_enabled: payload.smsEnabled,
-      phone: payload.phone,
+      phone: null,
+      phone_ciphertext: phone?.ciphertext ?? null,
+      phone_gcm_nonce: phone?.gcm_nonce ?? null,
+      phone_dek_wrapped: phone?.dek_wrapped ?? null,
+      phone_dek_kek_id: phone?.dek_kek_id ?? null,
     };
 
     const perTypeOverrides = payload.perTypeOverrides ?? {};
@@ -254,7 +283,7 @@ class NotificationService {
     return {
       emailEnabled: Boolean(row.email_enabled),
       smsEnabled: Boolean(row.sms_enabled),
-      phone: (row.phone as string | null) ?? null,
+      phone: payload.phone ?? null,
       perTypeOverrides,
     };
   }
@@ -328,7 +357,9 @@ class NotificationService {
   private async notifyUserExternal(userId: string, message: string, type: NotificationType) {
     try {
       const result = await query(
-        `SELECT up.email, up.phone, up.email_enabled, up.sms_enabled, unp.per_type_overrides
+        `SELECT up.email, up.phone, up.email_enabled, up.sms_enabled, unp.per_type_overrides,
+                up.email_ciphertext, up.email_gcm_nonce, up.email_dek_wrapped, up.email_dek_kek_id,
+                up.phone_ciphertext, up.phone_gcm_nonce, up.phone_dek_wrapped, up.phone_dek_kek_id
          FROM user_profiles up
          LEFT JOIN user_notification_preferences unp ON unp.user_id = up.public_key
          WHERE up.public_key = $1`,
@@ -342,16 +373,28 @@ class NotificationService {
       const overrides = (user.per_type_overrides as Record<string, boolean> | null) ?? {};
       if (overrides[type] === false) return;
 
-      if (user.email_enabled && user.email) {
-        await sendEmail(user.email, message, type);
+      // The e-mail address and the phone number are envelope encrypted; they
+      // are decrypted here, which is audited in `pii_access_log` (#1828).
+      const piiContext = {
+        recordId: userId,
+        actor: 'notification-service',
+        reason: `send ${type} notification`,
+        requestId: `notification:${userId}`,
+      };
+
+      const email = await readPiiValue(user as UserProfilePiiRow, 'email', piiContext);
+      const phone = await readPiiValue(user as UserProfilePiiRow, 'phone', piiContext);
+
+      if (user.email_enabled && email) {
+        await sendEmail(email, message, type);
       }
 
       // Trigger SMS for critical events: repayment_due, loan_defaulted, and loan_liquidated
       const smsEnabledForType =
         type === 'repayment_due' || type === 'loan_defaulted' || type === 'loan_liquidated';
 
-      if (user.sms_enabled && user.phone && smsEnabledForType) {
-        await sendSMS(user.phone, message);
+      if (user.sms_enabled && phone && smsEnabledForType) {
+        await sendSMS(phone, message);
       }
     } catch (error) {
       logger.withContext().error('Error sending external notifications', { userId, error });
