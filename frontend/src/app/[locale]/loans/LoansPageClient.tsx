@@ -5,7 +5,7 @@ import Link from "next/link";
 import { ArrowRight, CalendarRange, CircleDollarSign, HandCoins, ShieldCheck } from "lucide-react";
 import { ErrorBoundary } from "../../components/global_ui/ErrorBoundary";
 import { LoansListSkeleton } from "../../components/skeletons/LoansListSkeleton";
-import { useBorrowerLoansPage } from "../../hooks/useApi";
+import { useBorrowerLoansPage, useBorrowerLoans } from "../../hooks/useApi";
 import { LoanStatusBadge } from "../../components/ui/LoanStatusBadge";
 import { PaginationControls } from "../../components/ui/PaginationControls";
 import { useWalletStore, selectWalletAddress } from "../../stores/useWalletStore";
@@ -45,12 +45,26 @@ export function LoansPageClient() {
     status: activeTab === "all" ? undefined : activeTab,
   });
 
+  // Full, unfiltered portfolio — the summary cards must stay accurate no
+  // matter which status tab is selected (a "Repaid" tab would otherwise
+  // report $0 outstanding and a perfectly healthy portfolio).
+  const { loans: portfolioLoans, isLoading: isLoadingPortfolio } = useBorrowerLoans(
+    address ?? undefined,
+  );
+
   const displayedLoans = useMemo(() => {
     return (loansPage?.items ?? []).map((loan) => ({
       ...loan,
       displayStatus: getLoanDisplayStatus(loan.status, loan.nextPaymentDeadline, now),
     }));
   }, [loansPage?.items, now]);
+
+  const portfolioItems = useMemo(() => {
+    return portfolioLoans.map((loan) => ({
+      ...loan,
+      displayStatus: getLoanDisplayStatus(loan.status, loan.nextPaymentDeadline, now),
+    }));
+  }, [portfolioLoans, now]);
 
   const totalPages = Math.max(
     page,
@@ -59,14 +73,14 @@ export function LoansPageClient() {
       : Object.keys(pageCursors).length,
   );
 
-  const dueThisWeek = displayedLoans.filter((loan) => {
+  const dueThisWeek = portfolioItems.filter((loan) => {
     const dueAt = new Date(loan.nextPaymentDeadline).getTime();
     const sevenDays = 7 * 24 * 60 * 60 * 1000;
     return dueAt >= now && dueAt <= now + sevenDays;
   }).length;
 
-  const totalOwed = displayedLoans.reduce((sum, loan) => sum + loan.totalOwed, 0);
-  const overdueCount = displayedLoans.filter((loan) => loan.displayStatus === "defaulted").length;
+  const totalOwed = portfolioItems.reduce((sum, loan) => sum + loan.totalOwed, 0);
+  const overdueCount = portfolioItems.filter((loan) => loan.displayStatus === "defaulted").length;
   const portfolioHealth =
     overdueCount === 0
       ? t("health.strong")
@@ -74,7 +88,7 @@ export function LoansPageClient() {
         ? t("health.watch")
         : t("health.atRisk");
 
-  if (isLoading) {
+  if (isLoading || isLoadingPortfolio) {
     return <LoansListSkeleton />;
   }
 

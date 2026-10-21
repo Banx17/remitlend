@@ -147,6 +147,13 @@ export function Header({ onMenuClick, className }: HeaderProps) {
     return () => window.clearTimeout(timeout);
   }, [query]);
 
+  // Keep the highlighted option inside the result list: searchResults only
+  // updates when debouncedQuery (or the backing datasets) change, so any
+  // keystroke-driven index must be re-clamped once new results arrive.
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [debouncedQuery, searchResults.length]);
+
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (!wrapperRef.current?.contains(event.target as Node)) {
@@ -383,6 +390,7 @@ export function Header({ onMenuClick, className }: HeaderProps) {
 
         <button
           type="button"
+          onClick={() => router.push(`/${locale}/settings`)}
           aria-label={`Profile: ${profileLabel}`}
           className="flex items-center gap-2 rounded-full p-1 border border-zinc-200 hover:border-zinc-300 transition-colors dark:border-zinc-800 dark:hover:border-zinc-700"
         >

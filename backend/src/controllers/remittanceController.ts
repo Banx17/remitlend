@@ -158,6 +158,12 @@ export const getRemittances = asyncHandler(async (req: Request, res: Response) =
     actualSnapshotSeq = BigInt(maxSeqResult.rows[0]?.max_seq ?? 0);
   }
 
+  // Keep a filter-only snapshot of the clause/params before the snapshot,
+  // keyset, and limit params are appended — the count query below must bind
+  // exactly the filter params plus the snapshot seq.
+  const filterWhereClause = whereClause;
+  const filterParams = [...params];
+
   // Add snapshot constraint
   params.push(actualSnapshotSeq.toString());
   whereClause += ` AND seq <= $${params.length}`;
@@ -196,13 +202,13 @@ export const getRemittances = asyncHandler(async (req: Request, res: Response) =
     nextCursor = encodeCursor(new Date(lastRemittance.created_at), BigInt(lastRemittance.seq));
   }
 
-  // Count total at snapshot
-  const snapshotCountParams = params.slice(0, -2);
-  snapshotCountParams.pop(); // remove the seq constraint param
-  snapshotCountParams.push(actualSnapshotSeq.toString());
+  // Count total at snapshot: filter params + snapshot seq only (no keyset
+  // cursor params, no limit), so placeholder indices always match bindings.
+  const snapshotCountParams = [...filterParams, actualSnapshotSeq.toString()];
+  const snapshotCountWhereClause = `${filterWhereClause} AND seq <= $${filterParams.length + 1}`;
 
   const totalResult = await query(
-    `SELECT COUNT(*) as count FROM remittances WHERE ${whereClause.replace(` AND seq <= $${params.length}`, '')} AND seq <= $${snapshotCountParams.length}`,
+    `SELECT COUNT(*) as count FROM remittances WHERE ${snapshotCountWhereClause}`,
     snapshotCountParams,
   );
   const totalAtSnapshot = Number.parseInt(totalResult.rows[0].count, 10);

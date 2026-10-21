@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { signTransaction } from "@stellar/freighter-api";
 import { Modal } from "../ui/Modal";
 import { Input } from "../ui/Input";
@@ -65,11 +65,19 @@ export function RefinanceLoanModal({
   const [newPrincipal, setNewPrincipal] = useState<number>(
     Math.max(1, Math.round(currentPrincipal)),
   );
-  const [interestRatePercent, setInterestRatePercent] = useState<number>(
-    Number.isFinite(currentInterestRate) ? currentInterestRate : 0,
-  );
   const [termDays, setTermDays] = useState<30 | 60 | 90>(defaultTermDays);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Re-sync form state with the latest loan props whenever the modal opens so
+  // a reopened modal never shows stale principal/term values.
+  const wasOpenRef = useRef(isOpen);
+  useEffect(() => {
+    if (isOpen && !wasOpenRef.current) {
+      setNewPrincipal(Math.max(1, Math.round(currentPrincipal)));
+      setTermDays(defaultTermDays);
+    }
+    wasOpenRef.current = isOpen;
+  }, [isOpen, currentPrincipal, defaultTermDays]);
 
   const previewQuery = useLoanAmortizationPreview({
     amount: Math.max(1, Math.round(newPrincipal)),
@@ -155,10 +163,10 @@ export function RefinanceLoanModal({
             type="number"
             min={0}
             step={0.01}
-            value={Number.isFinite(interestRatePercent) ? interestRatePercent : ""}
-            onChange={(event) => setInterestRatePercent(Number(event.target.value))}
-            disabled={disabled}
-            helperText="Displayed for quote review before signing."
+            value={Number.isFinite(currentInterestRate) ? currentInterestRate : 0}
+            readOnly
+            aria-readonly
+            helperText="Determined on-chain from your credit score — not editable when refinancing."
           />
         </div>
 
