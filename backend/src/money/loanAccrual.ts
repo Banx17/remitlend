@@ -170,22 +170,13 @@ export function accrueWindowInterest(params: {
   residual: bigint;
 }): { interestStroops: bigint; residual: bigint } {
   const { principalStroops, interestRateBps, elapsedLedgers, termLedgers, residual } = params;
-  if (
-    principalStroops <= 0n ||
-    interestRateBps <= 0 ||
-    elapsedLedgers <= 0 ||
-    termLedgers <= 0
-  ) {
+  if (principalStroops <= 0n || interestRateBps <= 0 || elapsedLedgers <= 0 || termLedgers <= 0) {
     return { interestStroops: 0n, residual };
   }
 
   const delta = indexDelta(interestRateBps, BigInt(elapsedLedgers));
   // The interest of the window in millionths of a stroop.
-  const totalInterest = interestFromIndexDelta(
-    principalStroops,
-    delta,
-    BigInt(termLedgers),
-  );
+  const totalInterest = interestFromIndexDelta(principalStroops, delta, BigInt(termLedgers));
 
   const interestDelta = totalInterest / RESIDUAL_SCALE;
   const newResidual = totalInterest - interestDelta * RESIDUAL_SCALE;
@@ -277,13 +268,7 @@ export function accrueWindows(params: {
   /** Late fee charged on the loan so far, in whole stroops. */
   lateFeeStroops?: bigint;
 }): WindowedAccrual {
-  const {
-    principalStroops,
-    interestRateBps,
-    termLedgers,
-    approvedLedger,
-    currentLedger,
-  } = params;
+  const { principalStroops, interestRateBps, termLedgers, approvedLedger, currentLedger } = params;
 
   const settlements = [...params.settlements].sort((a, b) => a.ledger - b.ledger);
 

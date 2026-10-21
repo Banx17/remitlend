@@ -100,10 +100,7 @@ describe('accrueWindowInterest', () => {
 
 describe('splitRepayment', () => {
   it('splits a repayment across principal, interest and late fee', () => {
-    const [principal = 0n, interest = 0n, lateFee = 0n] = splitRepayment(
-      [600n, 300n, 100n],
-      500n,
-    );
+    const [principal = 0n, interest = 0n, lateFee = 0n] = splitRepayment([600n, 300n, 100n], 500n);
 
     expect(principal + interest + lateFee).toBe(500n);
     expect(principal).toBe(300n);

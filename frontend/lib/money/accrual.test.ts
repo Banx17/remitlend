@@ -25,10 +25,7 @@ import {
 // frontend's tsconfig.json targets ES2017 — see accrual.ts's header comment.
 const b = (n: number): bigint => BigInt(n);
 
-const VECTORS_PATH = path.resolve(
-  __dirname,
-  "../../../contracts/testdata/accrual_vectors.json",
-);
+const VECTORS_PATH = path.resolve(__dirname, "../../../contracts/testdata/accrual_vectors.json");
 
 interface AccrualVector {
   name: string;
@@ -140,7 +137,7 @@ describe("golden accrual vectors", () => {
   });
 
   it.each(doc.vectors.map((vector) => [vector.name, vector] as const))(
-    "reproduces \"%s\"",
+    'reproduces "%s"',
     (_name, vector) => {
       const delta = indexDelta(vector.rateBps, vector.elapsedLedgers);
       expect(delta.toString()).toBe(vector.indexDelta);

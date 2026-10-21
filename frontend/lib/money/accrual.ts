@@ -20,8 +20,6 @@ import { RoundingMode, roundDiv, MoneyError } from "./format";
 
 const ZERO = BigInt(0);
 const ONE = BigInt(1);
-const TWO = BigInt(2);
-const TEN = BigInt(10);
 const TEN_THOUSAND = BigInt(10000);
 
 /** Scale of the fixed-point index: `1e18` (18 decimal places). */
@@ -135,20 +133,12 @@ export function interestFromIndexDelta(
  * `rateBps / 10_000` is the rate charged over the whole term, so the
  * per-ledger rate is that value divided by the term length.
  */
-export function perLedgerRateScaled(
-  rateBps: number,
-  termLedgers: bigint | number,
-): bigint {
+export function perLedgerRateScaled(rateBps: number, termLedgers: bigint | number): bigint {
   const term = BigInt(termLedgers);
   if (term <= ZERO) {
     throw new MoneyError("per_ledger_rate_scaled: the term must be positive");
   }
-  return mulDiv(
-    BigInt(rateBps) * INDEX_SCALE,
-    ONE,
-    TEN_THOUSAND * term,
-    RoundingMode.Floor,
-  );
+  return mulDiv(BigInt(rateBps) * INDEX_SCALE, ONE, TEN_THOUSAND * term, RoundingMode.Floor);
 }
 
 /**

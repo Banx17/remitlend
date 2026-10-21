@@ -135,10 +135,7 @@ export function interestFromIndexDelta(
  * `rateBps / 10_000` is the rate charged over the whole term, so the
  * per-ledger rate is that value divided by the term length.
  */
-export function perLedgerRateScaled(
-  rateBps: number,
-  termLedgers: bigint | number,
-): bigint {
+export function perLedgerRateScaled(rateBps: number, termLedgers: bigint | number): bigint {
   const term = BigInt(termLedgers);
   if (term <= 0n) {
     throw new MoneyError('per_ledger_rate_scaled: the term must be positive');

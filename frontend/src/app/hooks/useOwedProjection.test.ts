@@ -99,9 +99,7 @@ describe("useOwedProjection", () => {
 
     expect(result.current.interestStroops).toBe(expected);
     expect(result.current.remainingPrincipalStroops).toBe(PRINCIPAL - BigInt("4000000000"));
-    expect(result.current.owedStroops).toBe(
-      PRINCIPAL - BigInt("4000000000") + expected,
-    );
+    expect(result.current.owedStroops).toBe(PRINCIPAL - BigInt("4000000000") + expected);
   });
 
   it("never projects a negative principal", () => {

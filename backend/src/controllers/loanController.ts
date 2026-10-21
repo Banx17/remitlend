@@ -19,7 +19,10 @@ import {
   accrueWindows,
   type LoanSettlement,
 } from '../money/loanAccrual.js';
-import { loadAccrueSnapshots, pairSnapshotsWithSettlements } from '../services/accrualIndexService.js';
+import {
+  loadAccrueSnapshots,
+  pairSnapshotsWithSettlements,
+} from '../services/accrualIndexService.js';
 
 // ─── Test/Dev Only ────────────────────────────────────────────────────────────
 

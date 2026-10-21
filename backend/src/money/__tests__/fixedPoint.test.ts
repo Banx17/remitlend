@@ -90,7 +90,8 @@ describe('fixed point accrual math', () => {
     for (const elapsed of [1n, 100n, 4320n, 17_280n]) {
       const delta = indexDelta(rateBps, elapsed);
       const viaIndex = interestFromIndexDelta(principal, delta, term);
-      const viaFormula = (principal * BigInt(rateBps) * elapsed * RESIDUAL_SCALE) / (10_000n * term);
+      const viaFormula =
+        (principal * BigInt(rateBps) * elapsed * RESIDUAL_SCALE) / (10_000n * term);
       expect(viaIndex).toBe(viaFormula);
     }
   });
