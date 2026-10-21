@@ -260,6 +260,29 @@ impl LoanManager {
         }
     }
 
+    // Returns true when `rate` sits inside the inclusive `[min_rate, max_rate]`
+    // band configured through `set_rate_bounds`.
+    //
+    // The two comparisons are deliberately independent: a rate is out of
+    // bounds when it is *either* below the floor *or* above the ceiling. A
+    // conjunction of the two (`rate < min && rate > max`) is unsatisfiable
+    // for a well-ordered band (`min <= max` is enforced by
+    // `set_rate_bounds`), so it made the guard unsatisfiable and turned the
+    // fallback branch into dead code — a stale or compromised oracle could
+    // then push the rate to zero (free loans) or to an extreme value without
+    // ever being rejected (#1297).
+    fn rate_within_bounds(rate: u32, min_rate: u32, max_rate: u32) -> bool {
+        // The band is inclusive on both ends: a rate exactly equal to the
+        // floor or the ceiling is still a valid, in-band rate.
+        if rate < min_rate {
+            return false;
+        }
+        if rate > max_rate {
+            return false;
+        }
+        true
+    }
+
     // Falls back to the configured default rate (rather than trapping
     // request_loan/refinance) both when the oracle invocation itself fails -
     // e.g. the oracle contract reverts, panics, or returns an undecodable
@@ -279,10 +302,10 @@ impl LoanManager {
                     let min_rate = Self::min_rate_bps(env);
                     let max_rate = Self::max_rate_bps(env);
 
-                    if oracle_rate < min_rate || oracle_rate > max_rate {
-                        Self::read_interest_rate(env)
-                    } else {
+                    if Self::rate_within_bounds(oracle_rate, min_rate, max_rate) {
                         oracle_rate
+                    } else {
+                        Self::read_interest_rate(env)
                     }
                 }
                 _ => Self::read_interest_rate(env),
