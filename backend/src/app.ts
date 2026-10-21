@@ -264,7 +264,8 @@ app.get(
           ? ('degraded' as const)
           : ('ok' as const);
 
-    const anyDown = db === 'down' || redis === 'down' || stellarRpc === 'down' || indexerStatus === 'down';
+    const anyDown =
+      db === 'down' || redis === 'down' || stellarRpc === 'down' || indexerStatus === 'down';
     const overallStatus = anyDown ? 'down' : indexerStatus === 'degraded' ? 'degraded' : 'ok';
 
     res.status(anyDown ? 503 : 200).json({

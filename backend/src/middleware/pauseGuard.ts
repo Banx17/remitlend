@@ -63,7 +63,13 @@ export async function updatePauseStateFromDatabase(): Promise<void> {
 // Routes that must remain accessible even when contracts are paused.
 // Authentication endpoints allow admins to log in during an incident, and
 // admin recovery routes let them investigate and resolve the pause.
-const PAUSE_EXEMPT_PREFIXES = ['/api/auth/', '/api/v1/auth/', '/api/admin/', '/api/v1/admin/', '/admin/'];
+const PAUSE_EXEMPT_PREFIXES = [
+  '/api/auth/',
+  '/api/v1/auth/',
+  '/api/admin/',
+  '/api/v1/admin/',
+  '/admin/',
+];
 
 export function pauseGuard(req: Request, _res: Response, next: NextFunction): void {
   // Allow read-only operations
