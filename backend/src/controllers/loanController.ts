@@ -277,6 +277,10 @@ const buildAmortizationSchedule = (
   for (let i = 1; i <= periodCount; i++) {
     const isLast = i === periodCount;
 
+    // Every owed amount is rounded to the nearest cent (never truncated
+    // towards zero, which would systematically undercharge the borrower -
+    // see #1372). The last period settles the remaining balance so the
+    // schedule always adds up to the rounded totals.
     const principalPortion = isLast
       ? roundToCents(remainingPrincipal)
       : roundToCents(rawPrincipalPortion);
