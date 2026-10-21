@@ -13,7 +13,13 @@ import { cacheService } from '../services/cacheService.js';
 import { notificationService } from '../services/notificationService.js';
 import { invalidateOnRepay, invalidateOnLoanRequest } from '../utils/cacheKeys.js';
 import { roundToCents } from '../money/decimal.js';
-import { parseStroopAmount, remainingPrincipal, accrueInterest } from '../money/loanAccrual.js';
+import {
+  parseStroopAmount,
+  remainingPrincipal,
+  accrueWindows,
+  type LoanSettlement,
+} from '../money/loanAccrual.js';
+import { loadAccrueSnapshots, pairSnapshotsWithSettlements } from '../services/accrualIndexService.js';
 
 // ─── Test/Dev Only ────────────────────────────────────────────────────────────
 
@@ -328,6 +334,62 @@ export const previewLoanAmortizationSchedule = asyncHandler(async (req: Request,
 });
 
 /**
+ * Load the settlements of a set of loans.
+ *
+ * A settlement is a repayment: it closed an accrual window on-chain, so the
+ * interest of that window is charged on the principal that was outstanding
+ * during it. The late fees charged on the loans are loaded alongside them
+ * because a repayment is split across the outstanding principal, the accrued
+ * interest and the accrued late fee.
+ */
+async function loadLoanSettlements(loanIds: number[]): Promise<{
+  settlements: Map<number, LoanSettlement[]>;
+  lateFees: Map<number, bigint>;
+}> {
+  const settlements = new Map<number, LoanSettlement[]>();
+  const lateFees = new Map<number, bigint>();
+  if (loanIds.length === 0) {
+    return { settlements, lateFees };
+  }
+
+  let rows: Record<string, unknown>[];
+  try {
+    const result = await query(
+      `SELECT loan_id, event_type, ledger, amount
+         FROM contract_events
+        WHERE loan_id = ANY($1::int[])
+          AND event_type IN ('LoanRepaid', 'LateFeeCharged')
+        ORDER BY loan_id ASC, ledger ASC, id ASC`,
+      [loanIds],
+    );
+    rows = result.rows as Record<string, unknown>[];
+  } catch (error) {
+    logger.withContext().warn('Failed to load loan settlements', { error });
+    return { settlements, lateFees };
+  }
+
+  for (const row of rows) {
+    const loanId = Number(row.loan_id);
+    if (!Number.isFinite(loanId)) continue;
+    if (row.event_type === 'LateFeeCharged') {
+      lateFees.set(
+        loanId,
+        (lateFees.get(loanId) ?? 0n) + parseStroopAmount(String(row.amount ?? '')),
+      );
+      continue;
+    }
+    const loanSettlements = settlements.get(loanId) ?? [];
+    loanSettlements.push({
+      ledger: Number(row.ledger ?? 0),
+      amountStroops: parseStroopAmount(String(row.amount ?? '')),
+    });
+    settlements.set(loanId, loanSettlements);
+  }
+
+  return { settlements, lateFees };
+}
+
+/**
  * Get active loans for a borrower
  *
  * GET /api/loans/borrower/:borrower
@@ -453,19 +515,66 @@ export const getBorrowerLoans = asyncHandler(async (req: Request, res: Response)
   const hasNext = result.rows.length > limit;
   const trimmedRows = hasNext ? result.rows.slice(0, limit) : result.rows;
 
+  // Issue #1382: the borrower's loans are accrued with the same windowed
+  // replay the detail endpoint uses, so both endpoints report the same
+  // interest and owed amount for a loan.
+  const listedLoanIds = trimmedRows.map((row: Record<string, unknown>) => Number(row.loan_id));
+  const { settlements: settlementsByLoan, lateFees: lateFeesByLoan } =
+    await loadLoanSettlements(listedLoanIds);
+  const snapshotsByLoan = await loadAccrueSnapshots(listedLoanIds);
+
   const loans: BorrowerLoan[] = trimmedRows.map((row: Record<string, unknown>) => {
     const isPending = row.status === 'pending_indexing';
+    const loanId = Number(row.loan_id);
+    const loanSettlements = settlementsByLoan.get(loanId) ?? [];
+    const pairedSnapshots = pairSnapshotsWithSettlements(
+      loanSettlements,
+      snapshotsByLoan.get(loanId) ?? [],
+    );
+    const settlements = loanSettlements.map((settlement, index) => {
+      const snapshot = pairedSnapshots[index];
+      return {
+        ...settlement,
+        ...(snapshot
+          ? {
+              bookedInterestStroops: snapshot.interestStroops,
+              residual: snapshot.residual,
+            }
+          : {}),
+      };
+    });
+
+    const accrual = accrueWindows({
+      principalStroops: parseStroopAmount(String(row.principal ?? '0')),
+      interestRateBps: Number(row.effective_rate_bps ?? DEFAULT_INTEREST_RATE_BPS),
+      termLedgers: Number(row.effective_term_ledgers ?? DEFAULT_TERM_LEDGERS),
+      approvedLedger: Number(row.effective_approved_ledger ?? 0),
+      settlements,
+      currentLedger: Number(row.dispute_freeze_ledger ?? currentLedger),
+      lateFeeStroops: lateFeesByLoan.get(loanId) ?? 0n,
+    });
+
+    const accruedInterest = Number(accrual.outstandingInterestStroops);
+    const totalOwed = Number(
+      accrual.remainingPrincipalStroops + accrual.outstandingInterestStroops,
+    );
+    const isDefaulted = row.status === 'defaulted';
+
     return {
-      loanId: Number(row.loan_id),
+      loanId,
       principal: Number.parseFloat((row.principal as string) || '0'),
-      accruedInterest: isPending
-        ? null
-        : Number.parseFloat((row.accrued_interest as string) || '0'),
+      accruedInterest: isPending ? null : accruedInterest,
       accruedLateFee: Number.parseFloat((row.accrued_late_fee as string) || '0'),
       totalRepaid: Number.parseFloat((row.total_repaid as string) || '0'),
-      totalOwed: isPending ? null : Number.parseFloat((row.total_owed as string) || '0'),
+      totalOwed: isPending ? null : totalOwed,
       nextPaymentDeadline: new Date(row.next_payment_deadline as string).toISOString(),
-      status: row.status as 'active' | 'repaid' | 'defaulted' | 'pending_indexing',
+      status: (isPending
+        ? 'pending_indexing'
+        : isDefaulted
+          ? 'defaulted'
+          : totalOwed > 0.01
+            ? 'active'
+            : 'repaid') as 'active' | 'repaid' | 'defaulted' | 'pending_indexing',
       borrower: row.address as string,
       approvedAt: row.approved_at ? new Date(row.approved_at as string).toISOString() : null,
       ...(typeof row.latest_event_type === 'string'
@@ -595,22 +704,61 @@ export const getLoanDetails = asyncHandler(async (req: Request, res: Response) =
 
   const isPending = approvedLedger <= 0 || currentLedger < approvedLedger;
 
-  const accruedInterestStroops = isPending
-    ? 0n
-    : accrueInterest({
-        remainingPrincipalStroops: remainingPrincipal(principalStroops, totalRepaidStroops),
-        interestRateBps: rateBps,
-        elapsedLedgers,
-        termLedgers,
-      });
+  // Issue #1382: the loan manager settles an accrual window on every
+  // repayment, and the interest of a window is charged on the principal that
+  // was outstanding during it. Replaying the windows reproduces the
+  // contract's own numbers; a single window over the whole term (the
+  // previous behaviour) drifts as soon as a loan is repaid in more than one
+  // instalment.
+  const lateFeeStroops = events
+    .filter((event: Record<string, unknown>) => event.event_type === 'LateFeeCharged')
+    .reduce(
+      (sum: bigint, event: Record<string, unknown>) =>
+        sum + parseStroopAmount(String(event.amount ?? '')),
+      0n,
+    );
+  const repaymentSettlements: LoanSettlement[] = repaymentEvents.map(
+    (event: Record<string, unknown>) => ({
+      ledger: Number(event.ledger ?? 0),
+      amountStroops: parseStroopAmount(String(event.amount ?? '')),
+    }),
+  );
+  const snapshotsByLoan = await loadAccrueSnapshots([Number(loanId)]);
+  const pairedSnapshots = pairSnapshotsWithSettlements(
+    repaymentSettlements,
+    snapshotsByLoan.get(Number(loanId)) ?? [],
+  );
+  const settlements = repaymentSettlements.map((settlement, index) => {
+    const snapshot = pairedSnapshots[index];
+    return {
+      ...settlement,
+      ...(snapshot
+        ? {
+            bookedInterestStroops: snapshot.interestStroops,
+            residual: snapshot.residual,
+          }
+        : {}),
+    };
+  });
+
+  const accrual = accrueWindows({
+    principalStroops,
+    interestRateBps: rateBps,
+    termLedgers,
+    approvedLedger,
+    settlements,
+    currentLedger: freezeLedger ?? currentLedger,
+    lateFeeStroops,
+  });
+  const accruedInterestStroops = isPending ? 0n : accrual.outstandingInterestStroops;
   const accruedInterest = Number(accruedInterestStroops);
   // Issue #1369: Owed amount must add accrued interest to remaining principal (not subtract).
   // remaining principal + interest accrued on it == principal + accrued - totalRepaid
-  const totalOwed = Number(
-    remainingPrincipal(principalStroops, totalRepaidStroops) + accruedInterestStroops,
-  );
-  const extensionFeeStroops =
-    (remainingPrincipal(principalStroops, totalRepaidStroops) * 100n) / 10_000n;
+  const remainingPrincipalStroops = isPending
+    ? remainingPrincipal(principalStroops, totalRepaidStroops)
+    : accrual.remainingPrincipalStroops;
+  const totalOwed = Number(remainingPrincipalStroops + accruedInterestStroops);
+  const extensionFeeStroops = (remainingPrincipalStroops * 100n) / 10_000n;
 
   res.json({
     success: true,

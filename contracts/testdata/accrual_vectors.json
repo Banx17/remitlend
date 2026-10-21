@@ -1,0 +1,104 @@
+{
+  "$comment": "Golden fixed-point accrual vectors shared by the contract, the backend and the frontend (issue #1382). The contract implementation (contracts/money/src/accrual.rs) is the source of truth; every layer asserts the same numbers from this file. Amounts are strings because they exceed the safe integer range.",
+  "indexScale": "1000000000000000000",
+  "rateScale": "100000000000000",
+  "residualScale": "1000000",
+  "vectors": [
+    {
+      "name": "12% over a quarter of a 30 day term on 100 tokens",
+      "rateBps": 1200,
+      "termLedgers": 17280,
+      "principalStroops": "1000000000",
+      "elapsedLedgers": 4320,
+      "indexDelta": "518400000000000000000",
+      "indexAfter": "519400000000000000000",
+      "perLedgerRateScaled": "6944444444444",
+      "interestScaled": "30000000000000",
+      "interestStroops": "30000000"
+    },
+    {
+      "name": "12% over a full 30 day term on 100 tokens",
+      "rateBps": 1200,
+      "termLedgers": 17280,
+      "principalStroops": "1000000000",
+      "elapsedLedgers": 17280,
+      "indexDelta": "2073600000000000000000",
+      "indexAfter": "2074600000000000000000",
+      "perLedgerRateScaled": "6944444444444",
+      "interestScaled": "120000000000000",
+      "interestStroops": "120000000"
+    },
+    {
+      "name": "5% over a single ledger on an odd principal",
+      "rateBps": 500,
+      "termLedgers": 10000,
+      "principalStroops": "123456789",
+      "elapsedLedgers": 1,
+      "indexDelta": "50000000000000000",
+      "indexAfter": "1050000000000000000",
+      "perLedgerRateScaled": "5000000000000",
+      "interestScaled": "617283945",
+      "interestStroops": "617"
+    },
+    {
+      "name": "1000% over a short term",
+      "rateBps": 100000,
+      "termLedgers": 1000,
+      "principalStroops": "1000000",
+      "elapsedLedgers": 999,
+      "indexDelta": "9990000000000000000000",
+      "indexAfter": "9991000000000000000000",
+      "perLedgerRateScaled": "10000000000000000",
+      "interestScaled": "9990000000000",
+      "interestStroops": "9990000"
+    },
+    {
+      "name": "12% over a full term on 50k tokens (wide product)",
+      "rateBps": 1200,
+      "termLedgers": 17280,
+      "principalStroops": "500000000000",
+      "elapsedLedgers": 17280,
+      "indexDelta": "2073600000000000000000",
+      "indexAfter": "2074600000000000000000",
+      "perLedgerRateScaled": "6944444444444",
+      "interestScaled": "60000000000000000",
+      "interestStroops": "60000000000"
+    },
+    {
+      "name": "no elapsed ledgers",
+      "rateBps": 1200,
+      "termLedgers": 17280,
+      "principalStroops": "1000000000",
+      "elapsedLedgers": 0,
+      "indexDelta": "0",
+      "indexAfter": "1000000000000000000",
+      "perLedgerRateScaled": "6944444444444",
+      "interestScaled": "0",
+      "interestStroops": "0"
+    },
+    {
+      "name": "sub stroop interest stays in the residual",
+      "rateBps": 1200,
+      "termLedgers": 17280,
+      "principalStroops": "1",
+      "elapsedLedgers": 1,
+      "indexDelta": "120000000000000000",
+      "indexAfter": "1120000000000000000",
+      "perLedgerRateScaled": "6944444444444",
+      "interestScaled": "6",
+      "interestStroops": "0"
+    },
+    {
+      "name": "zero rate",
+      "rateBps": 0,
+      "termLedgers": 17280,
+      "principalStroops": "1000000000",
+      "elapsedLedgers": 4320,
+      "indexDelta": "0",
+      "indexAfter": "1000000000000000000",
+      "perLedgerRateScaled": "0",
+      "interestScaled": "0",
+      "interestStroops": "0"
+    }
+  ]
+}

@@ -5914,8 +5914,14 @@ fn test_reverse_default_restores_loan_state_score_and_collateral() {
     assert_eq!(reinstated.due_date, env.ledger().sequence() + 17_280);
 
     // Collateral came back out of the pool to the borrower.
-    assert_eq!(token_client.balance(&borrower), borrower_balance_before_default + 400);
-    assert_eq!(token_client.balance(&pool_address), pool_balance_before_default);
+    assert_eq!(
+        token_client.balance(&borrower),
+        borrower_balance_before_default + 400
+    );
+    assert_eq!(
+        token_client.balance(&pool_address),
+        pool_balance_before_default
+    );
 
     // Credit record repaired: penalty refunded, default count cleared, seize lifted.
     assert_eq!(nft_client.get_score(&borrower), 600);
@@ -6007,7 +6013,10 @@ fn test_reverse_default_without_collateral_reinstates_the_loan() {
     let reinstated = manager.get_loan(&loan_id);
     assert_eq!(reinstated.status, LoanStatus::Approved);
     assert_eq!(reinstated.collateral_amount, 0);
-    assert_eq!(token_client.balance(&pool_address), pool_balance_before_default);
+    assert_eq!(
+        token_client.balance(&pool_address),
+        pool_balance_before_default
+    );
     assert_eq!(nft_client.get_score(&borrower), 600);
     assert_eq!(nft_client.get_default_count(&borrower), 0);
     assert!(!nft_client.is_seized(&borrower));
@@ -6333,4 +6342,302 @@ fn test_extend_loan_rejects_seized_borrower() {
     // Extending loan 2 for the seized borrower must fail with SeizedBorrower
     let res = manager.try_extend_loan(&borrower, &loan_2_id, &100);
     assert_eq!(res, Err(Ok(LoanError::SeizedBorrower)));
+}
+// ── Accrual index (#1382) ────────────────────────────────────────────────────
+
+/// Create an approved loan of `amount` units over `term_ledgers` ledgers and
+/// return its id. The borrower's score is high enough for the default rate.
+fn setup_approved_loan(
+    env: &Env,
+    manager: &LoanManagerClient,
+    nft_client: &RemittanceNFTClient,
+    pool_address: &Address,
+    token_id: &Address,
+    amount: i128,
+    term_ledgers: u32,
+) -> (u32, Address) {
+    // The loan's interest only starts accruing once it has a non-zero
+    // "last interest" ledger, which is the ledger it was approved at.
+    env.ledger().set_sequence_number(1);
+    let borrower = Address::generate(env);
+    let history_hash = soroban_sdk::BytesN::from_array(env, &[0u8; 32]);
+    nft_client.mint(
+        &borrower,
+        &600,
+        &history_hash,
+        &String::from_str(env, "ipfs://QmTest"),
+        &create_test_commitment(env, 1),
+        &None,
+    );
+    StellarAssetClient::new(env, token_id).mint(pool_address, &1_000_000);
+    let loan_id = manager.request_loan(&borrower, &amount, &term_ledgers);
+    manager.approve_loan(&loan_id);
+    (loan_id, borrower)
+}
+
+#[test]
+fn test_loan_index_starts_at_one_and_grows_with_time() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (manager, nft_client, pool_address, token_id, _admin) = setup_test(&env);
+    let (loan_id, _borrower) = setup_approved_loan(
+        &env,
+        &manager,
+        &nft_client,
+        &pool_address,
+        &token_id,
+        1_000,
+        17_280,
+    );
+
+    // A freshly approved loan has not accrued anything: its index is 1.0.
+    assert_eq!(manager.loan_index(&loan_id), money::accrual::INDEX_SCALE);
+
+    let rate_bps = manager.get_loan(&loan_id).interest_rate_bps;
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 1_000);
+
+    // The index grows by `rate / 10_000 * elapsed` (1e18 scaled).
+    let expected_delta = money::accrual::index_delta(rate_bps, 1_000).unwrap();
+    assert_eq!(
+        manager.loan_index(&loan_id),
+        money::accrual::INDEX_SCALE + expected_delta
+    );
+}
+
+#[test]
+fn test_repay_publishes_accrue_event_with_the_settled_index() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (manager, nft_client, pool_address, token_id, _admin) = setup_test(&env);
+    let (loan_id, borrower) = setup_approved_loan(
+        &env,
+        &manager,
+        &nft_client,
+        &pool_address,
+        &token_id,
+        1_000,
+        17_280,
+    );
+
+    let rate_bps = manager.get_loan(&loan_id).interest_rate_bps;
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 4_320);
+
+    // A partial repayment settles the accrued window and publishes it.
+    manager.repay(&borrower, &loan_id, &100);
+
+    let events = env.events().all();
+    let mut found = None;
+    for event in events.iter() {
+        let topic_0 = soroban_sdk::Symbol::from_val(&env, &event.1.get(0).unwrap());
+        if topic_0 != soroban_sdk::Symbol::new(&env, "accrue") {
+            continue;
+        }
+        let event_loan_id = u32::from_val(&env, &event.1.get(1).unwrap());
+        if event_loan_id != loan_id {
+            continue;
+        }
+        let payload = <(i128, i128, i128, i128)>::from_val(&env, &event.2);
+        found = Some(payload);
+    }
+
+    let (index, index_delta, interest_delta, _residual) =
+        found.expect("the repay must publish an `accrue` event");
+
+    let expected_delta = money::accrual::index_delta(rate_bps, 4_320).unwrap();
+    assert_eq!(index_delta, expected_delta);
+    assert_eq!(index, money::accrual::INDEX_SCALE + expected_delta);
+    // The interest of the window is the flat formula, unchanged by the index.
+    let expected_interest = 1_000i128 * (rate_bps as i128) * 4_320 / (10_000 * 17_280);
+    assert_eq!(interest_delta, expected_interest);
+}
+
+#[test]
+fn test_index_based_interest_matches_the_flat_formula() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (manager, nft_client, pool_address, token_id, _admin) = setup_test(&env);
+    let (loan_id, _borrower) = setup_approved_loan(
+        &env,
+        &manager,
+        &nft_client,
+        &pool_address,
+        &token_id,
+        1_000,
+        17_280,
+    );
+
+    let rate_bps = manager.get_loan(&loan_id).interest_rate_bps;
+    let term_ledgers = manager.get_loan(&loan_id).term_ledgers;
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 2_000);
+
+    let loan = manager.get_loan(&loan_id);
+    let elapsed = 2_000i128;
+    let expected = 1_000i128 * (rate_bps as i128) * elapsed / (10_000 * (term_ledgers as i128));
+    assert_eq!(loan.accrued_interest, expected);
+}
+
+#[test]
+fn test_borrow_index_advances_with_the_configured_rate() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (manager, nft_client, pool_address, token_id, _admin) = setup_test(&env);
+    let (loan_id, _borrower) = setup_approved_loan(
+        &env,
+        &manager,
+        &nft_client,
+        &pool_address,
+        &token_id,
+        1_000,
+        17_280,
+    );
+
+    // The loan records the reference index that was current at approval.
+    let origin = manager.loan_index_origin(&loan_id);
+    assert_eq!(origin, manager.borrow_index());
+
+    let before = manager.borrow_index();
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 500);
+    let rate_bps = manager.get_interest_rate();
+    let expected_delta = money::accrual::index_delta(rate_bps, 500).unwrap();
+    assert_eq!(manager.borrow_index() - before, expected_delta);
+}
+
+#[test]
+fn test_read_only_loan_view_does_not_publish_or_commit() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (manager, nft_client, pool_address, token_id, _admin) = setup_test(&env);
+    let (loan_id, _borrower) = setup_approved_loan(
+        &env,
+        &manager,
+        &nft_client,
+        &pool_address,
+        &token_id,
+        1_000,
+        17_280,
+    );
+
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 1_000);
+
+    // `get_loan` only computes the accrual: it must not commit the index.
+    let before = manager.loan_index(&loan_id);
+    let events_before = env.events().all().len();
+    let loan = manager.get_loan(&loan_id);
+    assert!(loan.accrued_interest > 0);
+    assert_eq!(manager.loan_index(&loan_id), before);
+    assert_eq!(env.events().all().len(), events_before);
+}
+
+/// The n-th `accrue` event a loan published, in publication order.
+fn accrue_event(env: &Env, loan_id: u32, index: usize) -> Option<(i128, i128, i128, i128)> {
+    let mut found = None;
+    let mut seen = 0usize;
+    for event in env.events().all().iter() {
+        let topic_0 = soroban_sdk::Symbol::from_val(env, &event.1.get(0).unwrap());
+        if topic_0 != soroban_sdk::Symbol::new(env, "accrue") {
+            continue;
+        }
+        let event_loan_id = u32::from_val(env, &event.1.get(1).unwrap());
+        if event_loan_id != loan_id {
+            continue;
+        }
+        if seen == index {
+            found = Some(<(i128, i128, i128, i128)>::from_val(env, &event.2));
+        }
+        seen += 1;
+    }
+    found
+}
+
+#[test]
+fn test_split_windows_book_the_interest_of_every_window() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (manager, nft_client, pool_address, token_id, _admin) = setup_test(&env);
+    let (loan_id, borrower) = setup_approved_loan(
+        &env,
+        &manager,
+        &nft_client,
+        &pool_address,
+        &token_id,
+        1_000,
+        17_280,
+    );
+
+    let rate_bps = manager.get_loan(&loan_id).interest_rate_bps;
+    let term_ledgers = manager.get_loan(&loan_id).term_ledgers as i128;
+
+    // The first window closes at 4_320 ledgers.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 4_320);
+    manager.repay(&borrower, &loan_id, &100);
+    let first = accrue_event(&env, loan_id, 0).expect("the first window is published");
+    // The principal that is outstanding while the second window accrues.
+    let outstanding = 1_000i128 - manager.get_loan(&loan_id).principal_paid;
+
+    // The second window closes at 8_640 ledgers and is charged on the
+    // principal that is still outstanding.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 4_320);
+    manager.repay(&borrower, &loan_id, &100);
+    let second = accrue_event(&env, loan_id, 0).expect("the second window is published");
+
+    let first_window = 1_000i128 * (rate_bps as i128) * 4_320 / (10_000 * term_ledgers);
+    assert_eq!(first.2, first_window);
+
+    let second_window = outstanding * (rate_bps as i128) * 4_320 / (10_000 * term_ledgers);
+    // The residual of the first window is carried into the second one, so
+    // the second window can be one stroop above the flat formula.
+    assert!(
+        second.2 == second_window || second.2 == second_window + 1,
+        "second window interest {} is not the flat formula {}",
+        second.2,
+        second_window
+    );
+
+    // The two windows together never exceed the flat formula over the whole
+    // period: the interest of a split term does not drift upwards.
+    let flat_overall = 1_000i128 * (rate_bps as i128) * 8_640 / (10_000 * term_ledgers);
+    assert!(first.2 + second.2 <= flat_overall);
+}
+
+#[test]
+fn test_index_overflow_is_reported_instead_of_wrapping() {
+    // The index bounds the accrual window it can represent. A window beyond
+    // the bound cannot be turned into an index and must be reported rather
+    // than silently wrapped.
+    let result = LoanManager::index_delta(1_200, money::accrual::MAX_WINDOW_LEDGERS + 1);
+    assert!(matches!(result, Err(LoanError::IndexOverflow)));
+
+    let result = LoanManager::index_delta(1_200, -1);
+    assert!(matches!(result, Err(LoanError::IndexOverflow)));
+}
+
+#[test]
+fn test_stale_index_is_reported_instead_of_being_used() {
+    // The index and the loan's accrual state are written together. An index
+    // that was committed at a later ledger than the loan's own state does not
+    // describe the interest that was booked and must not be used to settle.
+    let result = LoanManager::check_index_freshness(50, 1);
+    assert!(matches!(result, Err(LoanError::StaleIndex)));
+
+    // A consistent state is accepted.
+    let result = LoanManager::check_index_freshness(1, 1);
+    assert!(matches!(result, Ok(())));
+
+    // A loan that predates the index has no index ledger at all, which is
+    // still consistent with its accrual state.
+    let result = LoanManager::check_index_freshness(0, 1);
+    assert!(matches!(result, Ok(())));
 }

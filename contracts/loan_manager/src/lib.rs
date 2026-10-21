@@ -32,6 +32,7 @@ pub trait LendingPoolInterface {
     fn disburse_loan(env: Env, token: Address, borrower: Address, amount: i128);
 }
 
+mod accrual;
 mod events;
 
 #[contracterror]
@@ -68,6 +69,12 @@ pub enum LoanError {
     /// Raised by `reverse_default` when the loan is not in `Defaulted` state
     /// (only a default can be reversed — #1803).
     LoanNotDefaulted = 29,
+    /// Raised when the accrual index cannot be advanced without overflowing
+    /// the fixed-point representation (#1382).
+    IndexOverflow = 30,
+    /// Raised when a stored accrual index is older than the ledger the loan
+    /// was last accrued at, i.e. the on-chain state is inconsistent (#1382).
+    StaleIndex = 31,
 }
 
 #[contracttype]
@@ -144,6 +151,22 @@ pub enum DataKey {
     /// this the amount would be unrecoverable and an administrative reversal
     /// could not refund it (#1803).
     SeizedCollateral(u32),
+    /// The loan's cumulative accrual index — a `1e18` scaled accumulator of
+    /// `rate x time` shared by the contract, the backend and the frontend
+    /// (#1382). Kept in a separate key so the `Loan` struct layout (and
+    /// therefore every already stored loan) stays untouched.
+    LoanIndex(u32),
+    /// The ledger the loan's cumulative accrual index was committed at
+    /// (#1382). The index and the loan's `last_interest_ledger` are written
+    /// together, so a mismatch means the stored index is not the one the
+    /// loan's interest was derived from.
+    LoanIndexLedger(u32),
+    /// The pool-wide reference index a loan was originated at (#1382).
+    LoanIndexOrigin(u32),
+    /// The pool-wide reference accrual index (#1382).
+    BorrowIndex,
+    /// The ledger the pool-wide reference index was last advanced at (#1382).
+    BorrowIndexLedger,
 }
 
 #[contract]
@@ -357,10 +380,63 @@ impl LoanManager {
             .expect("principal paid exceeds amount")
     }
 
-    fn accrue_interest(env: &Env, loan: &mut Loan) -> Result<(), LoanError> {
+    /// Accrue the interest of the window that ends at the current ledger.
+    ///
+    /// The amount is derived from the loan's accrual index — the canonical
+    /// `1e18` scaled `rate x time` accumulator that the contract, the
+    /// backend and the frontend share (#1382) — instead of from a formula
+    /// that every layer re-derived on its own. The index based computation
+    /// is bit-for-bit identical to the previous
+    /// `principal * rate * elapsed / (10_000 * term)` formulation: the index
+    /// accumulates `rate x time` exactly, so no precision is lost before the
+    /// final division.
+    ///
+    /// `settle` decides whether the window is *committed*. Mutating
+    /// entrypoints persist the index and publish the `accrue` event so
+    /// indexers can replay the exact windows the contract settled; read-only
+    /// entrypoints (which must not write storage) only compute the same
+    /// numbers.
+    /// Consistency check between the stored index and the loan's own
+    /// accrual state.
+    ///
+    /// The index and `Loan::last_interest_ledger` are written together, so an
+    /// index that was committed at a *later* ledger than the loan's state is
+    /// inconsistent: it does not describe the interest that was booked and
+    /// must not be used to settle.
+    fn check_index_freshness(
+        index_ledger: u32,
+        last_interest_ledger: u32,
+    ) -> Result<(), LoanError> {
+        if index_ledger > last_interest_ledger {
+            return Err(LoanError::StaleIndex);
+        }
+        Ok(())
+    }
+
+    /// The index delta of an accrual window.
+    ///
+    /// Thin wrapper around the shared money crate that maps its overflow
+    /// onto [`LoanError::IndexOverflow`], so a window the index cannot
+    /// represent is reported instead of silently wrapping.
+    fn index_delta(rate_bps: u32, ledgers: i128) -> Result<i128, LoanError> {
+        money::accrual::index_delta(rate_bps, ledgers).map_err(|_| LoanError::IndexOverflow)
+    }
+
+    fn accrue_interest(
+        env: &Env,
+        loan_id: u32,
+        loan: &mut Loan,
+        settle: bool,
+    ) -> Result<(), LoanError> {
         if loan.status != LoanStatus::Approved {
             return Ok(());
         }
+
+        // The index and the loan's accrual state are written together. An
+        // index that was committed at a later ledger than the loan's own
+        // state is inconsistent and must not be used to settle.
+        let (_, index_ledger) = accrual::read_loan_index(env, loan_id);
+        Self::check_index_freshness(index_ledger, loan.last_interest_ledger)?;
 
         let current_ledger = env.ledger().sequence();
         if loan.last_interest_ledger == 0 || current_ledger <= loan.last_interest_ledger {
@@ -373,32 +449,40 @@ impl LoanManager {
             return Ok(());
         }
 
-        let elapsed_ledgers = current_ledger - loan.last_interest_ledger;
-        const PRECISION: i128 = 1_000_000;
-
-        // Calculate interest with high precision. Intermediate values are checked for overflow.
-        let numerator = remaining_principal
-            .checked_mul(loan.interest_rate_bps as i128)
-            .and_then(|v| v.checked_mul(elapsed_ledgers as i128))
-            .and_then(|v| v.checked_mul(PRECISION))
-            .ok_or(LoanError::AmountTooLarge)?;
+        let elapsed_ledgers = (current_ledger - loan.last_interest_ledger) as i128;
+        // The residual is carried at 1e-6 of a stroop; the shared money crate
+        // owns the constant so every layer uses the same precision.
+        const PRECISION: i128 = money::accrual::RESIDUAL_SCALE;
 
         let term_ledgers = if loan.term_ledgers == 0 {
             Self::read_default_term(env) as i128
         } else {
             loan.term_ledgers as i128
         };
-        let denominator = 10_000i128
-            .checked_mul(term_ledgers)
-            .ok_or(LoanError::AmountTooLarge)?;
+
+        // The index delta of the window: `rate / 10_000 * elapsed`, scaled by
+        // 1e18. It is exact (the scale factor is a whole number), so the
+        // interest below is identical to the pre-index computation.
+        let index_delta = Self::index_delta(loan.interest_rate_bps, elapsed_ledgers)?;
+        let (index, _) = accrual::read_loan_index(env, loan_id);
+        let index_after = money::accrual::advance_index(index, index_delta)
+            .map_err(|_| LoanError::IndexOverflow)?;
+
+        // Interest for the window, in units of 1e-6 stroops. The multiply is
+        // performed in 256 bits by the shared money crate, so it cannot
+        // overflow for the largest supported principal and term.
+        let total_interest = money::accrual::interest_from_index_delta(
+            remaining_principal,
+            index_delta,
+            term_ledgers,
+        )
+        .map_err(|_| LoanError::AmountTooLarge)?;
 
         // All stroop-quantity division routes through the shared `money`
         // crate so contracts, backend and frontend apply identical rounding
         // semantics. Floor is used here (not half-even) because the
         // remainder is explicitly carried forward as `interest_residual`
         // rather than discarded, so no precision is lost across calls.
-        let total_interest = money::round_div(numerator, denominator, money::RoundingMode::Floor)
-            .map_err(|_| LoanError::AmountTooLarge)?;
         let interest_delta =
             money::round_div(total_interest, PRECISION, money::RoundingMode::Floor)
                 .map_err(|_| LoanError::AmountTooLarge)?;
@@ -434,6 +518,41 @@ impl LoanManager {
         loan.interest_residual = final_residual;
         loan.last_interest_ledger = current_ledger;
 
+        if settle {
+            // Commit the window: persist the index and announce it so
+            // indexers can reproduce the contract's numbers off-chain.
+            accrual::write_loan_index(env, loan_id, index_after, current_ledger);
+            events::accrue(
+                env,
+                loan_id,
+                index_after,
+                index_delta,
+                total_accrued_delta,
+                final_residual,
+            );
+            Self::advance_borrow_index(env, current_ledger)?;
+        }
+
+        Ok(())
+    }
+
+    /// Advance the pool-wide reference index to `ledger`.
+    ///
+    /// The reference index tracks the *configured* borrow rate, so it can be
+    /// compared against a loan's own index to see whether that loan was
+    /// priced above or below the current market. It is advanced lazily:
+    /// every committed accrual brings it up to date with the current ledger.
+    fn advance_borrow_index(env: &Env, ledger: u32) -> Result<(), LoanError> {
+        let (index, last_ledger) = accrual::read_borrow_index(env);
+        if ledger <= last_ledger {
+            return Ok(());
+        }
+        let elapsed = (ledger - last_ledger) as i128;
+        let rate = Self::read_interest_rate(env);
+        let delta = Self::index_delta(rate, elapsed)?;
+        let updated =
+            money::accrual::advance_index(index, delta).map_err(|_| LoanError::IndexOverflow)?;
+        accrual::write_borrow_index(env, updated, ledger);
         Ok(())
     }
 
@@ -717,8 +836,13 @@ impl LoanManager {
         charged_fee
     }
 
-    fn current_total_debt(env: &Env, loan: &mut Loan) -> Result<(i128, i128), LoanError> {
-        Self::accrue_interest(env, loan)?;
+    fn current_total_debt(
+        env: &Env,
+        loan_id: u32,
+        loan: &mut Loan,
+        settle: bool,
+    ) -> Result<(i128, i128), LoanError> {
+        Self::accrue_interest(env, loan_id, loan, settle)?;
         let late_fee_delta = Self::accrue_late_fee(env, loan);
         let total_debt = Self::remaining_principal(loan)
             .checked_add(loan.accrued_interest)
@@ -1313,6 +1437,25 @@ impl LoanManager {
         // to spend its tokens.
         PoolClient::new(&env, &lending_pool).disburse_loan(&token, &borrower, &transfer_amount);
 
+        // Record the accrual index anchors for the loan (#1382): the loan's
+        // own index starts at 1.0 and the pool-wide reference index that was
+        // current at approval is the anchor the rate drift is measured
+        // against.
+        accrual::write_loan_index(
+            &env,
+            loan_id,
+            money::accrual::INDEX_SCALE,
+            env.ledger().sequence(),
+        );
+        Self::bump_persistent_ttl(&env, &DataKey::LoanIndex(loan_id));
+        Self::bump_persistent_ttl(&env, &DataKey::LoanIndexLedger(loan_id));
+        accrual::write_loan_index_origin(
+            &env,
+            loan_id,
+            Self::effective_borrow_index(&env, env.ledger().sequence()),
+        );
+        Self::bump_persistent_ttl(&env, &DataKey::LoanIndexOrigin(loan_id));
+
         events::loan_approved(
             &env,
             loan_id,
@@ -1333,8 +1476,73 @@ impl LoanManager {
             .get(&loan_key)
             .ok_or(LoanError::LoanNotFound)?;
         Self::bump_persistent_ttl(&env, &loan_key);
-        let _ = Self::current_total_debt(&env, &mut loan)?;
+        let _ = Self::current_total_debt(&env, loan_id, &mut loan, false)?;
         Ok(loan)
+    }
+
+    /// The pool-wide reference accrual index (#1382).
+    ///
+    /// The reference index accumulates the *configured* borrow rate, so it
+    /// can be compared against a loan's own index to see whether that loan
+    /// was priced above or below the current market. The value returned is
+    /// the one as of the current ledger.
+    pub fn borrow_index(env: Env) -> i128 {
+        let ledger = env.ledger().sequence();
+        Self::effective_borrow_index(&env, ledger)
+    }
+
+    /// A loan's cumulative accrual index as of the current ledger (#1382).
+    ///
+    /// The index is a `1e18` scaled accumulator of `rate x time`: it starts
+    /// at `1.0` when the loan is approved and grows for every ledger the
+    /// loan is outstanding. The interest of an accrual window is derived
+    /// from the difference between two index values.
+    pub fn loan_index(env: Env, loan_id: u32) -> Result<i128, LoanError> {
+        let loan_key = DataKey::Loan(loan_id);
+        let loan: Loan = env
+            .storage()
+            .persistent()
+            .get(&loan_key)
+            .ok_or(LoanError::LoanNotFound)?;
+        Self::bump_persistent_ttl(&env, &loan_key);
+        let (index, index_ledger) = accrual::read_loan_index(&env, loan_id);
+        let current_ledger = env.ledger().sequence();
+        Self::check_index_freshness(index_ledger, loan.last_interest_ledger)?;
+        let advanced = accrual::loan_index(
+            loan.interest_rate_bps,
+            loan.last_interest_ledger,
+            current_ledger,
+        )?;
+        // `accrual::loan_index` returns the index as of `current_ledger`
+        // starting from 1.0; re-base it onto the stored index so the value
+        // is continuous across the loan's whole life.
+        let window_delta = advanced
+            .checked_sub(money::accrual::INDEX_SCALE)
+            .ok_or(LoanError::IndexOverflow)?;
+        money::accrual::advance_index(index, window_delta).map_err(|_| LoanError::IndexOverflow)
+    }
+
+    /// The pool-wide reference index a loan was originated at (#1382).
+    ///
+    /// Comparing it with [`Self::borrow_index`] shows how far the pool's
+    /// reference rate has moved since the loan was priced.
+    pub fn loan_index_origin(env: Env, loan_id: u32) -> Result<i128, LoanError> {
+        if !env.storage().persistent().has(&DataKey::Loan(loan_id)) {
+            return Err(LoanError::LoanNotFound);
+        }
+        Ok(accrual::read_loan_index_origin(&env, loan_id))
+    }
+
+    /// The pool-wide reference index as of `ledger`, without committing it.
+    fn effective_borrow_index(env: &Env, ledger: u32) -> i128 {
+        let (index, last_ledger) = accrual::read_borrow_index(env);
+        if ledger <= last_ledger {
+            return index;
+        }
+        let elapsed = (ledger - last_ledger) as i128;
+        let rate = Self::read_interest_rate(env);
+        let delta = money::accrual::index_delta(rate, elapsed).unwrap_or(0);
+        money::accrual::advance_index(index, delta).unwrap_or(index)
     }
 
     /// Return the raw status discriminant of a loan without accruing interest.
@@ -1423,7 +1631,8 @@ impl LoanManager {
             return Err(LoanError::LoanPastDue);
         }
 
-        let (total_debt, late_fee_delta) = Self::current_total_debt(&env, &mut loan)?;
+        let (total_debt, late_fee_delta) =
+            Self::current_total_debt(&env, loan_id, &mut loan, true)?;
         if amount > total_debt {
             return Err(LoanError::RepaymentExceedsDebt);
         }
@@ -1698,7 +1907,7 @@ impl LoanManager {
             return Ok(false);
         }
 
-        let (total_debt, _) = Self::current_total_debt(&env, &mut loan)?;
+        let (total_debt, _) = Self::current_total_debt(&env, loan_id, &mut loan, false)?;
         let threshold_bps = Self::liquidation_threshold_bps(&env);
         Ok(Self::is_collateral_ratio_below_threshold(
             loan.collateral_amount,
@@ -1722,7 +1931,7 @@ impl LoanManager {
             return Ok((loan.collateral_amount, 0, 0));
         }
 
-        let (total_debt, _) = Self::current_total_debt(&env, &mut loan)?;
+        let (total_debt, _) = Self::current_total_debt(&env, loan_id, &mut loan, false)?;
         let ratio_bps = Self::current_ratio_bps(loan.collateral_amount, total_debt);
         Ok((loan.collateral_amount, total_debt, ratio_bps))
     }
@@ -1766,7 +1975,7 @@ impl LoanManager {
         }
 
         let total_debt = {
-            let (current_total_debt, _) = Self::current_total_debt(&env, &mut loan)?;
+            let (current_total_debt, _) = Self::current_total_debt(&env, loan_id, &mut loan, true)?;
             current_total_debt
         };
         let threshold_bps = Self::liquidation_threshold_bps(&env);
@@ -2179,7 +2388,7 @@ impl LoanManager {
         }
 
         // Settle all accrued interest and late fees up to now.
-        Self::accrue_interest(&env, &mut loan)?;
+        Self::accrue_interest(&env, loan_id, &mut loan, true)?;
         let _ = Self::accrue_late_fee(&env, &mut loan);
 
         let token: Address = env
@@ -2932,11 +3141,7 @@ impl LoanManager {
             .expect("lending pool not set");
 
         let seized_key = DataKey::SeizedCollateral(loan_id);
-        let seized: i128 = env
-            .storage()
-            .persistent()
-            .get(&seized_key)
-            .unwrap_or(0);
+        let seized: i128 = env.storage().persistent().get(&seized_key).unwrap_or(0);
 
         // ── CHECKS ──────────────────────────────────────────────────────────
         // Fail before mutating anything if the refund cannot be covered: a

@@ -60,6 +60,25 @@ export interface SorobanRawEvent {
   contractId: string;
 }
 
+/**
+ * The loan manager's accrual snapshot (#1382).
+ *
+ * The loan manager publishes an `accrue` event whenever it settles an
+ * accrual window. The payload carries the loan's cumulative index, the index
+ * delta of the window, the interest the window produced and the sub-stroop
+ * residual that was carried into the next window.
+ */
+interface ParsedAccrueEvent {
+  eventId: string;
+  loanId: number;
+  ledger: number;
+  indexValue: string;
+  indexDelta: string;
+  interestDelta: string;
+  residual: string;
+  txHash: string;
+}
+
 interface ContractEvent extends IndexedLoanEvent {
   amount?: string;
   loanId?: number;
@@ -546,8 +565,15 @@ export class EventIndexer {
     const parsedEvents: ContractEvent[] = [];
     let quarantineAttempts = 0;
 
+    const accrueEvents: ParsedAccrueEvent[] = [];
+
     for (const event of events) {
       try {
+        const accrue = this.parseAccrueEvent(event);
+        if (accrue) {
+          accrueEvents.push(accrue);
+          continue;
+        }
         const parsed = this.parseEvent(event);
         if (parsed) {
           parsedEvents.push(parsed);
@@ -566,7 +592,14 @@ export class EventIndexer {
       await this.logQuarantineGrowth(quarantineAttempts);
     }
 
-    if (parsedEvents.length === 0) {
+    // The accrual snapshots live in their own table: they are the contract's
+    // own numbers and the backend replays them to reproduce the on-chain
+    // accrual off-chain.
+    if (accrueEvents.length > 0) {
+      await this.storeAccrueEvents(accrueEvents);
+    }
+
+    if (parsedEvents.length === 0 && accrueEvents.length === 0) {
       return { insertedCount: 0 };
     }
 
@@ -750,6 +783,95 @@ export class EventIndexer {
     return {
       insertedCount: insertedEvents.length,
     };
+  }
+
+  /**
+   * Parse the loan manager's `accrue` event.
+   *
+   * The event is not a webhook event, so it is handled outside the regular
+   * event pipeline: it is stored in the `interest_index` table and used to
+   * reproduce the contract's accrual off-chain.
+   */
+  private parseAccrueEvent(event: SorobanRawEvent): ParsedAccrueEvent | null {
+    const type = event.topic[0]?.sym?.().toString();
+    if (type !== 'accrue') {
+      return null;
+    }
+    if (!event.topic[1]) {
+      throw new Error(`accrue event missing loan_id: ${event.id}`);
+    }
+    const loanId = this.decodeLoanId(event.topic[1]);
+    if (loanId === undefined) {
+      throw new Error(`accrue event has an invalid loan_id: ${event.id}`);
+    }
+
+    const data = scValToNative(event.value);
+    if (!Array.isArray(data) || data.length < 4) {
+      throw new Error(`accrue event missing its index payload: ${event.id}`);
+    }
+
+    const toIntegerString = (value: unknown, field: string): string => {
+      if (typeof value === 'bigint' || (typeof value === 'number' && Number.isInteger(value))) {
+        return BigInt(value).toString();
+      }
+      throw new Error(`accrue event has an invalid ${field}: ${event.id}`);
+    };
+
+    return {
+      eventId: event.id,
+      loanId,
+      ledger: Number(event.ledger),
+      indexValue: toIntegerString(data[0], 'index'),
+      indexDelta: toIntegerString(data[1], 'index_delta'),
+      interestDelta: toIntegerString(data[2], 'interest_delta'),
+      residual: toIntegerString(data[3], 'residual'),
+      txHash: event.txHash,
+    };
+  }
+
+  /**
+   * Persist the accrual snapshots.
+   *
+   * The insert is idempotent (one row per accrue event) and runs in its own
+   * transaction so a missing `interest_index` table cannot roll back the
+   * events that were indexed alongside it.
+   */
+  private async storeAccrueEvents(accrueEvents: ParsedAccrueEvent[]): Promise<void> {
+    try {
+      await withTransaction(async (client: PoolClient) => {
+        for (const accrue of accrueEvents) {
+          await client.query(
+            `INSERT INTO interest_index (
+              loan_id,
+              ledger,
+              index_value,
+              index_delta,
+              interest_delta,
+              residual,
+              event_id,
+              tx_hash
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (event_id) DO NOTHING`,
+            [
+              accrue.loanId,
+              accrue.ledger,
+              accrue.indexValue,
+              accrue.indexDelta,
+              accrue.interestDelta,
+              accrue.residual,
+              accrue.eventId,
+              accrue.txHash,
+            ],
+          );
+        }
+      });
+    } catch (error) {
+      logger.withContext().warn('Failed to store accrual index snapshots', {
+        error,
+        count: accrueEvents.length,
+      });
+    }
   }
 
   private parseEvent(event: SorobanRawEvent): ContractEvent | null {

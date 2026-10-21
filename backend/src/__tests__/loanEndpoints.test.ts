@@ -427,10 +427,16 @@ describe('GET /api/loans/:loanId', () => {
     expect(response.status).toBe(200);
     expect(response.body.summary.principal).toBe(10000000000);
     expect(response.body.summary.totalRepaid).toBe(5000000000);
-    // Half the principal repaid -> interest accrues on the remaining 5e9 stroops
-    // over 10 elapsed ledgers, not on the full 1e10 original principal.
-    expect(response.body.summary.accruedInterest).toBe(347222);
-    expect(response.body.summary.totalOwed).toBe(5000000000 + 347222);
+    // Issue #1382: the contract settles an accrual window on every
+    // repayment, so the interest is the sum of two windows:
+    //   [20, 25)  5 ledgers on the full 1e10 principal -> 347222
+    //   [25, 30)  5 ledgers on the remaining principal -> 173617
+    // The repayment of 5e9 is split between principal and interest
+    // (4999826395 / 173605), so the outstanding interest is
+    // 347222 - 173605 + 173617 = 347234 and the remaining principal is
+    // 5000173605.
+    expect(response.body.summary.accruedInterest).toBe(347234);
+    expect(response.body.summary.totalOwed).toBe(5000173605 + 347234);
     expect(response.body.summary.status).toBe('active');
   });
 
