@@ -58,12 +58,12 @@ const { errorHandler } = await import('../middleware/errorHandler.js');
 const { generateJwtToken } = await import('../services/authService.js');
 const { eventStreamService } = await import('../services/eventStreamService.js');
 
-function buildApp(): Express {
+const buildApp = (): Express => {
   const app = express();
   app.use('/api/events', eventRoutes);
   app.use(errorHandler);
   return app;
-}
+};
 
 const app = buildApp();
 
@@ -97,15 +97,15 @@ const openStreams: Stream[] = [];
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-async function waitFor(predicate: () => boolean, what: string, timeoutMs = 2000): Promise<void> {
+const waitFor = async (predicate: () => boolean, what: string, timeoutMs = 2000): Promise<void> => {
   const started = Date.now();
   while (!predicate()) {
     if (Date.now() - started > timeoutMs) throw new Error(`Timed out waiting for ${what}`);
     await sleep(10);
   }
-}
+};
 
-function openStream(path: string, headers: Record<string, string>): Stream {
+const openStream = (path: string, headers: Record<string, string>): Stream => {
   const stream: Stream = { status: 0, raw: '', destroy: () => req.destroy() };
   const req = http.get(`${baseUrl}${path}`, { headers, agent: false }, (res) => {
     stream.status = res.statusCode ?? 0;
@@ -117,7 +117,7 @@ function openStream(path: string, headers: Record<string, string>): Stream {
   req.on('error', () => {});
   openStreams.push(stream);
   return stream;
-}
+};
 
 const frameIds = (raw: string) => [...raw.matchAll(/^id: (.*)$/gm)].map((m) => m[1]);
 

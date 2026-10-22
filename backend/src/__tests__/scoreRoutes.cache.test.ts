@@ -58,13 +58,13 @@ const { generateJwtToken } = await import('../services/authService.js');
 const USER = 'GSCORECACHEUSER';
 const OTHER = 'GSCORECACHEOTHER';
 
-function buildApp(): Express {
+const buildApp = (): Express => {
   const app = express();
   app.use(express.json());
   app.use('/api/score', scoreRoutes);
   app.use(errorHandler);
   return app;
-}
+};
 
 const app = buildApp();
 

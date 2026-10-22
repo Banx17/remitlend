@@ -46,7 +46,7 @@ const WINDOW_MS = 60_000;
 let clock = Date.UTC(2026, 0, 1);
 const nowSpy = jest.spyOn(Date, 'now');
 
-function buildApp(): Express {
+const buildApp = (): Express => {
   const app = express();
   // Lets tests pick a client IP through X-Forwarded-For.
   app.set('trust proxy', 'loopback');
@@ -54,7 +54,7 @@ function buildApp(): Express {
   app.use('/api/auth', authRoutes);
   app.use(errorHandler);
   return app;
-}
+};
 
 const app = buildApp();
 

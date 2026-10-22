@@ -48,13 +48,13 @@ const { encodeCursor, decodeCursor } = await import('../utils/pagination.js');
 const BORROWER = 'GBORROWERINDEXERREPLAY';
 const OTHER = 'GOTHERINDEXERREPLAY';
 
-function buildApp(): Express {
+const buildApp = (): Express => {
   const app = express();
   app.use(express.json());
   app.use('/api/indexer', indexerRoutes);
   app.use(errorHandler);
   return app;
-}
+};
 
 const app = buildApp();
 
@@ -83,7 +83,12 @@ interface DbFixture {
   loanOwner?: string | null;
 }
 
-function useDb({ maxSeq = '900', page = [], total = '0', loanOwner = BORROWER }: DbFixture = {}) {
+const useDb = ({
+  maxSeq = '900',
+  page = [],
+  total = '0',
+  loanOwner = BORROWER,
+}: DbFixture = {}) => {
   mockQuery.mockImplementation(async (text: string) => {
     if (text.includes('MAX(seq)')) return { rows: [{ max_seq: maxSeq }] };
     if (text.includes('COUNT(*) as count')) return { rows: [{ count: total }] };
@@ -93,7 +98,7 @@ function useDb({ maxSeq = '900', page = [], total = '0', loanOwner = BORROWER }:
     }
     return { rows: [] };
   });
-}
+};
 
 const pageQueryParams = (): unknown[] => {
   const call = mockQuery.mock.calls.find(([text]) => text.includes('ORDER BY created_at DESC'));
