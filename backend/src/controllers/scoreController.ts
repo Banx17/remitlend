@@ -127,6 +127,7 @@ export const updateScore = asyncHandler(async (req: Request, res: Response) => {
   // Invalidate cache
   const cacheKey = `score:userId:${userId}`;
   await cacheService.delete(cacheKey);
+  await cacheService.delete(`score:breakdown:${userId}`);
 
   res.json({
     success: true,
