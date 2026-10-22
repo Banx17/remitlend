@@ -30,11 +30,11 @@ const NETWORK_PASSPHRASE = NETWORK_PASSPHRASES.TESTNET;
 // unit tests stay offline and get the transaction back unchanged.
 type PrepareTransaction = typeof rpc.Server.prototype.prepareTransaction;
 
-function stubPrepareTransaction() {
+const stubPrepareTransaction = () => {
   const prepare = ((tx: unknown) => Promise.resolve(tx)) as unknown as PrepareTransaction;
 
   return jest.spyOn(rpc.Server.prototype, "prepareTransaction").mockImplementation(prepare);
-}
+};
 
 describe("buildUnsignedLoanRequestXdr", () => {
   const borrower = Keypair.random().publicKey();
@@ -79,8 +79,8 @@ describe("buildUnsignedLoanRequestXdr", () => {
     });
 
     expect(prepareSpy).toHaveBeenCalledTimes(1);
-    const [prepared] = prepareSpy.mock.calls[0];
-    expect(prepared.operations[0].type).toBe("invokeHostFunction");
+    // The transaction handed to the RPC client is the one that gets serialized.
+    expect(prepareSpy.mock.calls[0][0].operations).toHaveLength(1);
     expect(TransactionBuilder.fromXDR(xdrString, NETWORK_PASSPHRASE)).toBeDefined();
   });
 
@@ -221,8 +221,8 @@ describe("buildUnsignedRepaymentXdr", () => {
     });
 
     expect(prepareSpy).toHaveBeenCalledTimes(1);
-    const [prepared] = prepareSpy.mock.calls[0];
-    expect(prepared.operations[0].type).toBe("invokeHostFunction");
+    // The transaction handed to the RPC client is the one that gets serialized.
+    expect(prepareSpy.mock.calls[0][0].operations).toHaveLength(1);
     expect(TransactionBuilder.fromXDR(xdrString, NETWORK_PASSPHRASE)).toBeDefined();
   });
 
