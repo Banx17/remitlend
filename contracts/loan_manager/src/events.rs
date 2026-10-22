@@ -44,6 +44,7 @@
 //! | `accrue` | `("accrue", loan_id: u32)` | `(index: i128, index_delta: i128, interest_delta: i128, residual: i128)` |
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol};
+use crate::LoanManager;
 
 /// Emits event when a borrower requests a new loan.
 ///
@@ -442,7 +443,11 @@ mod tests {
         let env = Env::default();
         let borrower = Address::generate(&env);
 
-        loan_requested(&env, 7, borrower.clone(), 12_345);
+       
+       let contract_id = env.register(LoanManager, ());
+        env.as_contract(&contract_id, || {
+            loan_requested(&env, 7, borrower.clone(), 12_345);
+         });
 
         let event = env.events().all().get(0).unwrap();
         assert_eq!(event.1.len(), 3);
@@ -461,8 +466,11 @@ mod tests {
         let borrower = Address::generate(&env);
         let reason = String::from_str(&env, "manual review failed");
 
-        loan_rejected(&env, 9, reason.clone());
-        loan_cancelled(&env, borrower.clone(), 9);
+        let contract_id = env.register(LoanManager, ());
+        env.as_contract(&contract_id, || {
+            loan_rejected(&env, 9, reason.clone());
+            loan_cancelled(&env, borrower.clone(), 9);
+         });
 
         let events = env.events().all();
         let rejected = events.get(0).unwrap();
@@ -492,7 +500,10 @@ mod tests {
         let env = Env::default();
         let borrower = Address::generate(&env);
 
-        loan_approved(&env, u32::MAX, borrower.clone(), u32::MAX, u32::MAX);
+     let contract_id = env.register(LoanManager, ());
+       env.as_contract(&contract_id, || {
+             loan_approved(&env, u32::MAX, borrower.clone(), u32::MAX, u32::MAX);
+       });
 
         let event = env.events().all().get(0).unwrap();
         assert_eq!(event.1.len(), 3);
@@ -511,8 +522,11 @@ mod tests {
         let admin = Address::generate(&env);
         let borrower = Address::generate(&env);
 
-        loan_approved_by_admin(&env, admin.clone(), 11, borrower.clone());
-
+       let contract_id = env.register(LoanManager, ());
+      env.as_contract(&contract_id, || {
+           loan_approved_by_admin(&env, admin.clone(), 11, borrower.clone());
+        });
+        
         let event = env.events().all().get(0).unwrap();
         assert_eq!(event.1.len(), 2);
         assert_eq!(
