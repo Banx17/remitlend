@@ -115,7 +115,7 @@ describe("normalizeRemittanceFilters", () => {
 
       it("handles DST spring forward boundary (2026-03-08 in US)", () => {
         // When DST starts, the day has 23 hours in local time but 24 in UTC
-        // Our function uses UTC so this should not affect the result
+        // The implementation uses UTC so this should not affect the result
         expect(normalizeRemittanceFilters(input({ dateFrom: "2026-03-08" }))).toEqual({
           from: "2026-03-08T00:00:00.000Z",
         });
@@ -135,7 +135,7 @@ describe("normalizeRemittanceFilters", () => {
       });
 
       it("produces chronologically ordered bounds when from > to", () => {
-        // The function doesn't validate order; it just normalizes each bound
+        // The implementation doesn't validate order; it just normalizes each bound
         const { from, to } = normalizeRemittanceFilters(
           input({ dateFrom: "2026-01-20", dateTo: "2026-01-10" }),
         );
