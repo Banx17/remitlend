@@ -64,13 +64,13 @@ const scopedKeys = {
 } as const;
 type AdminScope = keyof typeof scopedKeys;
 
-function buildApp(): Express {
+const buildApp = (): Express => {
   const app = express();
   app.use(express.json());
   app.use('/api/admin', adminRoutes);
   app.use(errorHandler);
   return app;
-}
+};
 
 const scopedRoutes: Array<{
   scope: AdminScope;
