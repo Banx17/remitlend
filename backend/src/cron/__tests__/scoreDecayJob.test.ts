@@ -46,4 +46,44 @@ describe('scoreDecayJob', () => {
     const { default: runScoreDecayJob } = await import('../scoreDecayJob.js');
     await expect(runScoreDecayJob()).resolves.not.toThrow();
   });
+
+  it('skips an overlapping run while a previous pass is still in flight', async () => {
+    let finishFirstPass!: () => void;
+    mockGetInactiveBorrowers.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishFirstPass = () => resolve([]);
+      }),
+    );
+    const { default: runScoreDecayJob } = await import('../scoreDecayJob.js');
+
+    const firstPass = runScoreDecayJob();
+    await runScoreDecayJob();
+
+    expect(mockGetInactiveBorrowers).toHaveBeenCalledTimes(1);
+    expect(mockApplyScoreDecay).not.toHaveBeenCalled();
+
+    finishFirstPass();
+    await firstPass;
+  });
+
+  it('allows a new pass once the previous one has completed', async () => {
+    mockGetInactiveBorrowers.mockResolvedValue([]);
+    const { default: runScoreDecayJob } = await import('../scoreDecayJob.js');
+
+    await runScoreDecayJob();
+    await runScoreDecayJob();
+
+    expect(mockGetInactiveBorrowers).toHaveBeenCalledTimes(2);
+  });
+
+  it('releases the guard after an unhandled failure so the next pass runs', async () => {
+    mockGetInactiveBorrowers.mockRejectedValueOnce(new Error('DB error'));
+    mockGetInactiveBorrowers.mockResolvedValueOnce([]);
+    const { default: runScoreDecayJob } = await import('../scoreDecayJob.js');
+
+    await runScoreDecayJob();
+    await runScoreDecayJob();
+
+    expect(mockGetInactiveBorrowers).toHaveBeenCalledTimes(2);
+  });
 });
