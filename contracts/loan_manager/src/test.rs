@@ -645,6 +645,32 @@ fn test_reject_pending_loan() {
 }
 
 #[test]
+fn test_unauthorized_approval_emits_no_event_and_keeps_loan_pending() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (manager, nft_client, _pool, _token, _token_admin) = setup_test(&env);
+    let borrower = Address::generate(&env);
+    let history_hash = BytesN::from_array(&env, &[0u8; 32]);
+    nft_client.mint(
+        &borrower,
+        &600,
+        &history_hash,
+        &String::from_str(&env, "ipfs://QmTest"),
+        &create_test_commitment(&env, 1),
+        &None,
+    );
+    let loan_id = manager.request_loan(&borrower, &1_000, &17_280);
+    let event_count_before = env.events().all().len();
+
+    env.mock_auths(&[]);
+    assert!(manager.try_approve_loan(&loan_id).is_err());
+
+    assert_eq!(env.events().all().len(), event_count_before);
+    assert_eq!(manager.get_loan(&loan_id).status, LoanStatus::Pending);
+}
+
+#[test]
 fn test_cancel_decrements_borrower_loan_count() {
     let env = Env::default();
     env.mock_all_auths();
