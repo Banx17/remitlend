@@ -5,22 +5,39 @@ module.exports = {
     es2021: true,
     jest: true,
   },
-  parser: "@typescript-eslint/parser",
+  parser: '@typescript-eslint/parser',
   parserOptions: {
     ecmaVersion: 2020,
-    sourceType: "module",
-    project: "./tsconfig.json",
+    sourceType: 'module',
+    tsconfigRootDir: __dirname,
+    project: './tsconfig.json',
   },
-  plugins: ["@typescript-eslint", "prettier"],
+  plugins: ['@typescript-eslint', 'prettier'],
   extends: [
-    "eslint:recommended",
-    "plugin:@typescript-eslint/recommended",
-    "plugin:prettier/recommended",
+    'eslint:recommended',
+    'plugin:@typescript-eslint/recommended',
+    'plugin:prettier/recommended',
   ],
   rules: {
-    "prettier/prettier": "error",
-    "@typescript-eslint/no-unused-vars": ["warn", { argsIgnorePattern: "^_" }],
-    "@typescript-eslint/explicit-module-boundary-types": "off",
-    "no-console": ["warn", { allow: ["warn", "error"] }],
+    'prettier/prettier': 'error',
+    '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+    '@typescript-eslint/explicit-module-boundary-types': 'off',
+    'no-console': ['warn', { allow: ['warn', 'error'] }],
+    '@typescript-eslint/no-explicit-any': 'warn',
+    'no-constant-condition': 'off',
   },
+  overrides: [
+    {
+      files: ['**/*.test.ts', '**/*.spec.ts', 'src/tests/**/*.ts', 'src/**/__tests__/**/*.ts'],
+      rules: {
+        'no-useless-catch': 'off',
+      },
+    },
+    {
+      files: ['src/utils/demo*.ts'],
+      rules: {
+        'no-console': 'off',
+      },
+    },
+  ],
 };

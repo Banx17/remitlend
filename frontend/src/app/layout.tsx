@@ -1,12 +1,17 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import "./globals.css";
+import "./[locale]/globals.css";
 import { QueryProvider } from "./components/providers/QueryProvider";
+import { WalletProvider } from "./components/providers/WalletProvider";
 import { DashboardShell } from "./components/global_ui/DashboardShell";
-import { Toaster } from "./components/ui/Toast";
+import { Toaster } from "./components/ui/Toaster";
 import { LevelUpModal } from "./components/gamification/LevelUpModal";
 import { GlobalXPGain } from "./components/global_ui/GlobalXPGain";
 import { ErrorBoundary } from "./components/global_ui/ErrorBoundary";
+import { NextIntlClientProvider } from "next-intl";
+import { getLocale, getMessages } from "next-intl/server";
+import { THEME_STORAGE_KEY } from "./lib/theme";
+import { getSiteUrl } from "./lib/metadata";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -19,71 +24,44 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: getSiteUrl(),
   title: "RemitLend - Borderless P2P Lending & Remittance",
   description:
     "Global peer-to-peer lending and instant remittances powered by blockchain technology. Send money and grow your wealth across borders.",
-  keywords: [
-    "P2P Lending",
-    "Remittance",
-    "Blockchain",
-    "DeFi",
-    "Global Payments",
-    "Borderless Finance",
-  ],
-  authors: [{ name: "RemitLend Team" }],
-  openGraph: {
-    title: "RemitLend - Borderless P2P Lending & Remittance",
-    description:
-      "Global peer-to-peer lending and instant remittances powered by blockchain technology. Send money and grow your wealth across borders.",
-    url: "https://remitlend.com",
-    siteName: "RemitLend",
-    images: [
-      {
-        url: "/og-image.png",
-        width: 1200,
-        height: 630,
-        alt: "RemitLend - Borderless P2P Lending",
-      },
-    ],
-    locale: "en_US",
-    type: "website",
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: "RemitLend - Borderless P2P Lending & Remittance",
-    description:
-      "Global peer-to-peer lending and instant remittances powered by blockchain technology. Send money and grow your wealth across borders.",
-    images: ["/og-image.png"],
-    creator: "@remitlend",
-  },
-  metadataBase: new URL("https://remitlend.com"),
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const locale = await getLocale();
+  const messages = await getMessages();
+
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang={locale} suppressHydrationWarning>
       <head>
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var t=localStorage.getItem("remitlend-theme");var d=t==="dark"||(t!=="light"&&matchMedia("(prefers-color-scheme:dark)").matches);if(d)document.documentElement.classList.add("dark")}catch(e){}})()`,
+            __html: `(function(){try{var root=document.documentElement;var stored=localStorage.getItem("${THEME_STORAGE_KEY}");if(stored==="system"){var resolved=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";root.dataset.theme="system";root.classList.toggle("dark",resolved==="dark");}else if(stored==="dark"||stored==="light"){root.dataset.theme=stored;root.classList.toggle("dark",stored==="dark");}else{var theme=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";root.dataset.theme=theme;root.classList.toggle("dark",theme==="dark");}}catch(e){}})()`,
           }}
         />
       </head>
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
-        <QueryProvider>
-          <DashboardShell>
-            <ErrorBoundary scope="active page" variant="section">
-              {children}
-            </ErrorBoundary>
-          </DashboardShell>
-          <Toaster />
-          <LevelUpModal />
-          <GlobalXPGain />
-        </QueryProvider>
+        <NextIntlClientProvider locale={locale} messages={messages}>
+          <QueryProvider>
+            <WalletProvider>
+              <DashboardShell>
+                <ErrorBoundary scope="active page" variant="section">
+                  {children}
+                </ErrorBoundary>
+              </DashboardShell>
+            </WalletProvider>
+            <Toaster />
+            <LevelUpModal />
+            <GlobalXPGain />
+          </QueryProvider>
+        </NextIntlClientProvider>
       </body>
     </html>
   );

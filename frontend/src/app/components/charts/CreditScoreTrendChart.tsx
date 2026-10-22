@@ -32,23 +32,6 @@ export function CreditScoreTrendChart({ data, className }: CreditScoreTrendChart
   const percentChange = firstScore > 0 ? ((scoreDiff / firstScore) * 100).toFixed(1) : "0.0";
   const isPositive = scoreDiff >= 0;
 
-  // Custom tooltip
-  const CustomTooltip = ({ active, payload }: any) => {
-    if (active && payload && payload.length) {
-      const data = payload[0].payload;
-      return (
-        <div className="rounded-lg border border-gray-200 bg-white p-3 shadow-lg dark:border-zinc-800 dark:bg-zinc-950">
-          <p className="text-sm font-medium text-gray-900 dark:text-zinc-100">{data.date}</p>
-          <p className="text-lg font-bold text-blue-600 dark:text-blue-400">Score: {data.score}</p>
-          {data.event && (
-            <p className="text-xs text-gray-600 dark:text-zinc-400 mt-1">{data.event}</p>
-          )}
-        </div>
-      );
-    }
-    return null;
-  };
-
   return (
     <Card className={className}>
       <CardHeader>
@@ -96,7 +79,29 @@ export function CreditScoreTrendChart({ data, className }: CreditScoreTrendChart
                 className: "text-xs text-gray-600 dark:text-zinc-400",
               }}
             />
-            <Tooltip content={<CustomTooltip />} />
+            <Tooltip
+              content={({ active, payload }: any) => {
+                if (active && payload && payload.length) {
+                  const item = (payload[0] as unknown as { payload: CreditScoreDataPoint }).payload;
+                  return (
+                    <div className="rounded-lg border border-gray-200 bg-white p-3 shadow-lg dark:border-zinc-800 dark:bg-zinc-950">
+                      <p className="text-sm font-medium text-gray-900 dark:text-zinc-100">
+                        {item.date}
+                      </p>
+                      <p className="text-lg font-bold text-blue-600 dark:text-blue-400">
+                        Score: {item.score}
+                      </p>
+                      {item.event && (
+                        <p className="text-xs text-gray-600 dark:text-zinc-400 mt-1">
+                          {item.event}
+                        </p>
+                      )}
+                    </div>
+                  );
+                }
+                return null;
+              }}
+            />
             <Legend
               wrapperStyle={{
                 paddingTop: "20px",

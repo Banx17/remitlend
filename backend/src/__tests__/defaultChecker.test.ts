@@ -1,0 +1,108 @@
+import { jest } from '@jest/globals';
+import { Account, Keypair } from '@stellar/stellar-sdk';
+import logger from '../utils/logger.js';
+
+// checkOverdueLoans runs backfillExtensionDueLedgers(), which queries the
+// database directly; keep the unit test off a real connection.
+const mockQuery = jest.fn<() => Promise<{ rows: unknown[] }>>().mockResolvedValue({ rows: [] });
+await jest.unstable_mockModule('../db/connection.js', () => ({
+  default: { query: mockQuery },
+  query: mockQuery,
+  getClient: jest.fn(),
+  closePool: jest.fn(),
+  withTransaction: jest.fn(),
+}));
+
+const { DefaultChecker } = await import('../services/defaultChecker.js');
+
+describe('DefaultChecker', () => {
+  const originalBatchSize = process.env.DEFAULT_CHECK_BATCH_SIZE;
+  const originalBatchTimeoutMs = process.env.DEFAULT_CHECK_BATCH_TIMEOUT_MS;
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+
+    if (originalBatchSize === undefined) {
+      delete process.env.DEFAULT_CHECK_BATCH_SIZE;
+    } else {
+      process.env.DEFAULT_CHECK_BATCH_SIZE = originalBatchSize;
+    }
+
+    if (originalBatchTimeoutMs === undefined) {
+      delete process.env.DEFAULT_CHECK_BATCH_TIMEOUT_MS;
+    } else {
+      process.env.DEFAULT_CHECK_BATCH_TIMEOUT_MS = originalBatchTimeoutMs;
+    }
+  });
+
+  it('times out a stuck batch and continues processing later batches', async () => {
+    process.env.DEFAULT_CHECK_BATCH_SIZE = '1';
+    process.env.DEFAULT_CHECK_BATCH_TIMEOUT_MS = '10';
+
+    const checker = new DefaultChecker();
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => logger as typeof logger);
+
+    (checker as unknown as Record<string, unknown>).acquireLock = async () => true;
+    (checker as unknown as Record<string, unknown>).releaseLock = async () => undefined;
+    // Stubbed so this test doesn't hit the real (unmocked) db/connection.js —
+    // see hasSuspectLedgerRanges in defaultChecker.ts, added for issue #1376.
+    (checker as unknown as Record<string, unknown>).hasSuspectLedgerRanges = async () => false;
+    const validPublicKey = Keypair.random().publicKey();
+    (checker as unknown as Record<string, unknown>).assertConfigured = () => ({
+      signer: {
+        publicKey: () => validPublicKey,
+      },
+      server: {
+        getLatestLedger: async () => ({ sequence: 4321 }),
+        getAccount: async (publicKey: string) => new Account(publicKey, '100'),
+      },
+      passphrase: 'test-passphrase',
+    });
+    (checker as unknown as Record<string, unknown>).fetchOverdueStats = async () => ({
+      overdueCount: 2,
+      oldestDueLedger: 4200,
+      ledgersPastOldestDue: 121,
+    });
+    (checker as unknown as Record<string, unknown>).fetchOverdueLoanIds = async () => [101, 102];
+
+    let submissionCount = 0;
+    (checker as unknown as Record<string, unknown>).submitCheckDefaults = async (
+      _server: unknown,
+      _signer: unknown,
+      _passphrase: string,
+      loanIds: number[],
+    ) => {
+      submissionCount += 1;
+      if (submissionCount === 1) {
+        return new Promise<never>(() => undefined);
+      }
+
+      return {
+        loanIds,
+        txHash: 'second-batch-hash',
+        submitStatus: 'PENDING',
+      };
+    };
+
+    const result = await checker.checkOverdueLoans();
+
+    expect(result!.batches).toHaveLength(2);
+    expect(result!.batches[0]).toMatchObject({
+      loanIds: [101],
+      timedOut: true,
+      error: 'batch timed out after 10ms',
+    });
+    expect(result!.batches[1]).toMatchObject({
+      loanIds: [102],
+      txHash: 'second-batch-hash',
+      submitStatus: 'PENDING',
+    });
+    expect(warnSpy).toHaveBeenCalledWith(
+      'Default check batch timed out',
+      expect.objectContaining({
+        loanIds: [101],
+        timeoutMs: 10,
+      }),
+    );
+  });
+});

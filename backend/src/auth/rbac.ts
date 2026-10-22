@@ -1,16 +1,18 @@
-export const USER_ROLES = ["admin", "borrower", "lender"] as const;
+export const USER_ROLES = ['admin', 'borrower', 'lender'] as const;
 export type UserRole = (typeof USER_ROLES)[number];
 
 export const ROLE_SCOPES: Record<UserRole, string[]> = {
-  admin: ["admin:all"],
+  admin: ['admin:all'],
   borrower: [
-    "read:loans",
-    "write:repayment",
-    "read:score",
-    "read:notifications",
-    "write:notifications",
+    'read:loans',
+    'write:loans',
+    'read:score',
+    'read:notifications',
+    'write:notifications',
+    'read:remittances',
+    'write:remittances',
   ],
-  lender: ["read:loans", "read:pool"],
+  lender: ['read:loans', 'read:pool', 'write:loans'],
 };
 
 const parseWalletSet = (wallets: string | undefined): Set<string> => {
@@ -18,7 +20,7 @@ const parseWalletSet = (wallets: string | undefined): Set<string> => {
 
   return new Set(
     wallets
-      .split(",")
+      .split(',')
       .map((wallet) => wallet.trim())
       .filter((wallet) => wallet.length > 0),
   );
@@ -27,20 +29,20 @@ const parseWalletSet = (wallets: string | undefined): Set<string> => {
 export const resolveRoleForWallet = (publicKey: string): UserRole => {
   const adminWallets = parseWalletSet(process.env.ADMIN_WALLETS);
   if (adminWallets.has(publicKey)) {
-    return "admin";
+    return 'admin';
   }
 
   const lenderWallets = parseWalletSet(process.env.LENDER_WALLETS);
   if (lenderWallets.has(publicKey)) {
-    return "lender";
+    return 'lender';
   }
 
-  return "borrower";
+  return 'borrower';
 };
 
 export const resolveScopesForRole = (role: UserRole): string[] => {
   const ownScopes = ROLE_SCOPES[role] ?? [];
-  if (role === "admin") {
+  if (role === 'admin') {
     return [...ownScopes];
   }
 

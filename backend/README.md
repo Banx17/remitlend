@@ -61,19 +61,25 @@ Rollback last batch (when needed):
 npm run migrate:down
 ```
 
+Scripts use `migrate:up` and `migrate:down` (colon-separated names), which work reliably across shells and CI.
+
 Core tables are created by these migrations (run in filename order):
 
-| Migration                                | Tables                                     |
-| ---------------------------------------- | ------------------------------------------ |
-| `1771691269865_initial-schema.js`        | `scores`, `remittance_history`             |
-| `1771691269866_loan-events-schema.js`    | `loan_events`, `indexer_state`             |
-| `1772000000000_webhook-subscriptions.js` | `webhook_subscriptions`                    |
-| `1773000000001_user-profiles.js`         | `user_profiles`                            |
-| `1773000000002_loan-history.js`          | `loan_history`                             |
-| `1773000000003_indexed-events.js`        | `indexed_events`                           |
-| `1774000000004_scores-add-created-at.js` | adds `created_at` to `scores` (idempotent) |
+| Migration                                    | Tables                                             |
+| -------------------------------------------- | -------------------------------------------------- |
+| `1771691269865_initial-schema.js`            | `scores`, `remittance_history`                     |
+| `1771691269866_loan-events-schema.js`        | `loan_events`, `indexer_state`                     |
+| `1772000000000_webhook-subscriptions.js`     | `webhook_subscriptions`                            |
+| `1773000000001_user-profiles.js`             | `user_profiles`                                    |
+| `1773000000002_loan-history.js`              | `loan_history`                                     |
+| `1773000000003_indexed-events.js`            | `indexed_events`                                   |
+| `1774000000004_scores-add-created-at.js`     | adds `created_at` to `scores` (idempotent)         |
+| `1777000000007_unique-loan-status-events.js` | dedupes and enforces unique status events per loan |
 
 With Docker Compose from the repo root, the `backend` service runs `migrate:up` before `npm run dev` so the schema is applied automatically when the database is healthy.
+
+Full database schema documentation, including every table, column, index, and
+historical renames, is available in [`docs/DATABASE.md`](../docs/DATABASE.md).
 
 ### Environment Variables
 
@@ -84,7 +90,16 @@ Create a `.env` file in the backend directory:
 PORT=3001
 
 # CORS Configuration
-CORS_ALLOWED_ORIGINS=http://localhost:3000
+FRONTEND_URL=http://localhost:3000
+# Optional backward-compatible fallback for multiple allowed origins during migration
+# CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001
+
+# Stellar Configuration
+STELLAR_NETWORK=testnet
+STELLAR_RPC_URL=https://soroban-testnet.stellar.org
+STELLAR_NETWORK_PASSPHRASE=Test SDF Network ; September 2015
+LOAN_MANAGER_CONTRACT_ID=
+LOAN_MANAGER_ADMIN_SECRET=
 
 # Future: Add API keys for remittance services
 # WISE_API_KEY=your_key_here
@@ -100,6 +115,8 @@ npm run dev          # Start dev server with hot reload
 # Database
 npm run migrate:up   # Apply migrations (requires DATABASE_URL)
 npm run migrate:down # Roll back last migration batch
+npm run seed         # Seed realistic local development data
+npm run seed:reset   # Reset and reseed development data
 
 # Production
 npm run build        # Compile TypeScript to JavaScript
@@ -115,6 +132,30 @@ npm run lint         # Check code quality
 npm run lint:fix     # Fix linting issues
 npm run format       # Format code with Prettier
 npm run format:check # Check code formatting
+```
+
+### Development seed data
+
+New contributors can populate a realistic local dataset after running migrations:
+
+```bash
+npm run seed
+```
+
+This seeds:
+
+- `user_profiles` with sample borrowers and a lender
+- `scores` with varied borrower scores
+- `remittance_history` with completed, late, missed, and pending records
+- `loan_history` with pending, active, repaid, and defaulted loans
+- `loan_events` so borrower dashboards, loan details, pool stats, and SSE endpoints have data
+- `notifications` with both read and unread sample messages
+- `indexer_state` so interest calculations have a seeded latest ledger
+
+To wipe those local development rows and recreate them from scratch:
+
+```bash
+npm run seed:reset
 ```
 
 ## API Endpoints
@@ -198,16 +239,22 @@ Simulate remittance history for testing purposes.
 
 ## API Documentation
 
-Interactive API documentation is available via Swagger UI when the server is running:
+Interactive API documentation is available via Swagger UI when the server is running outside production, or in production when `ENABLE_SWAGGER=true` is set:
 
-**URL**: [http://localhost:3001/api-docs](http://localhost:3001/api-docs)
+**URL**: [http://localhost:3001/docs](http://localhost:3001/docs)
+
+The raw OpenAPI document is available at [http://localhost:3001/docs.json](http://localhost:3001/docs.json) under the same environment gate.
 
 The Swagger documentation provides:
 
 - Complete endpoint specifications
 - Request/response schemas
 - Interactive API testing
-- Authentication details (when implemented)
+- Authentication details
+
+For the full auth model (challenge-signature-JWT flow, role-scope table,
+API-key namespaces, cookie attributes) see
+[docs/SECURITY-MODEL.md](../docs/SECURITY-MODEL.md).
 
 ## Project Structure
 
@@ -255,7 +302,7 @@ backend/
 Centralized error handling middleware that catches and formats errors.
 
 ```typescript
-import { errorHandler } from "./middleware/errorHandler";
+import { errorHandler } from './middleware/errorHandler';
 app.use(errorHandler);
 ```
 
@@ -264,10 +311,10 @@ app.use(errorHandler);
 Request validation using Zod schemas.
 
 ```typescript
-import { validate } from "./middleware/validation";
-import { mySchema } from "./schemas/mySchemas";
+import { validate } from './middleware/validation';
+import { mySchema } from './schemas/mySchemas';
 
-router.post("/endpoint", validate(mySchema), controller);
+router.post('/endpoint', validate(mySchema), controller);
 ```
 
 ### Rate Limiter
@@ -275,8 +322,8 @@ router.post("/endpoint", validate(mySchema), controller);
 Protects endpoints from abuse with configurable rate limits.
 
 ```typescript
-import { rateLimiter } from "./middleware/rateLimiter";
-app.use("/api/", rateLimiter);
+import { rateLimiter } from './middleware/rateLimiter';
+app.use('/api/', rateLimiter);
 ```
 
 ### Async Handler
@@ -284,10 +331,10 @@ app.use("/api/", rateLimiter);
 Wraps async route handlers to catch errors automatically.
 
 ```typescript
-import { asyncHandler } from "./middleware/asyncHandler";
+import { asyncHandler } from './middleware/asyncHandler';
 
 router.get(
-  "/endpoint",
+  '/endpoint',
   asyncHandler(async (req, res) => {
     // Async code here
   }),
@@ -295,6 +342,21 @@ router.get(
 ```
 
 ## Testing
+
+### Test Environment Variables
+
+Test environment variables are **not** committed to the repository. A template is provided:
+
+```bash
+# Create your local test env file
+cp .env.test.example .env.test
+```
+
+The `.env.test` file is loaded automatically by `jest.setup.js` before every test run.
+All values in `.env.test.example` are placeholders — replace them only when needed locally.
+
+> **Note:** `.env.test` is listed in `.gitignore` to prevent accidental credential leaks.
+> Never commit real secrets in test files.
 
 ### Running Tests
 
@@ -315,14 +377,14 @@ npm test -- --watch
 ### Test Structure
 
 ```typescript
-import request from "supertest";
-import app from "../app";
+import request from 'supertest';
+import app from '../app';
 
-describe("GET /api/health", () => {
-  it("should return 200 OK", async () => {
-    const response = await request(app).get("/api/health").expect(200);
+describe('GET /api/health', () => {
+  it('should return 200 OK', async () => {
+    const response = await request(app).get('/api/health').expect(200);
 
-    expect(response.body).toHaveProperty("status", "ok");
+    expect(response.body).toHaveProperty('status', 'ok');
   });
 });
 ```
@@ -341,9 +403,9 @@ Aim for >80% code coverage on new code. Current coverage:
 ### Custom Error Class
 
 ```typescript
-import { AppError } from "./errors/AppError";
+import { AppError } from './errors/AppError';
 
-throw new AppError("User not found", 404);
+throw new AppError('User not found', 404);
 ```
 
 ### Error Response Format
@@ -364,11 +426,11 @@ Validation schemas are defined using Zod in the `schemas/` directory.
 ### Example Schema
 
 ```typescript
-import { z } from "zod";
+import { z } from 'zod';
 
 export const getUserScoreSchema = z.object({
   params: z.object({
-    userId: z.string().min(1, "User ID is required"),
+    userId: z.string().min(1, 'User ID is required'),
   }),
 });
 

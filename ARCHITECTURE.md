@@ -1,8 +1,8 @@
-# RemitLend System Architecture
+#RemitLend System Architecture
 
 RemitLend is a decentralized lending platform built on the Stellar network using Soroban smart contracts. It leverages remittance history to establish creditworthiness for migrant workers who lack traditional credit history.
 
-## Table of Contents
+##Table of Contents
 
 - [Overview](#overview)
 - [Architecture Principles](#architecture-principles)
@@ -15,6 +15,7 @@ RemitLend is a decentralized lending platform built on the Stellar network using
     - [Frontend Standard Library & Patterns](docs/wiki/frontend-patterns.md)
 - [Security Model](#security-model)
 - [Technology Stack](#technology-stack)
+- [Lender Dashboard Design](LENDERS_DASHBOARD_DESIGN.md)
 
 ## Overview
 
@@ -263,7 +264,7 @@ The backend serves as a bridge between the frontend and blockchain, handling off
 - `GET /api/health` - Health check
 - `GET /api/score/:userId` - Get user credit score
 - `POST /api/score/simulate` - Simulate remittance history
-- `GET /api-docs` - Swagger documentation
+- `GET /docs` - Swagger documentation
 
 **Middleware**:
 - `errorHandler` - Centralized error handling
@@ -1322,3 +1323,7 @@ graph TB
 ---
 
 For implementation details, see the code in respective directories. For contribution guidelines, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Runbooks
+
+Operational runbooks for on-call engineers are available in [docs/runbooks/](docs/runbooks/). See the [Indexer Recovery Runbook](docs/runbooks/indexer-recovery.md) for procedures on handling indexer lag, RPC outages, and quarantined events.

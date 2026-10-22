@@ -1,15 +1,55 @@
-import { rpc as SorobanRpc, scValToNative, xdr } from "@stellar/stellar-sdk";
-import { query } from "../db/connection.js";
-import logger from "../utils/logger.js";
-import { createRequestId, runWithRequestContext } from "../utils/requestContext.js";
+import { rpc as SorobanRpc, scValToNative, xdr } from '@stellar/stellar-sdk';
+import { type PoolClient, query, withTransaction } from '../db/connection.js';
+import logger from '../utils/logger.js';
+import { createRequestId, runWithRequestContext } from '../utils/requestContext.js';
 import {
   type IndexedLoanEvent,
+  SUPPORTED_WEBHOOK_EVENT_TYPES,
   type WebhookEventType,
   webhookService,
-} from "./webhookService.js";
-import { eventStreamService } from "./eventStreamService.js";
+} from './webhookService.js';
+import { eventStreamService } from './eventStreamService.js';
+import { notificationService, type NotificationType } from './notificationService.js';
+import { sorobanService } from './sorobanService.js';
+import { updateUserScoresBulk } from './scoresService.js';
+import { recordIndexerLedgers } from '../middleware/metrics.js';
+import { setPauseState } from '../middleware/pauseGuard.js';
+import { fromStroops } from '../money/decimal.js';
 
-interface SorobanRawEvent {
+const EVENT_TYPE_ALIASES: Record<string, WebhookEventType> = {
+  Mint: 'NFTMinted',
+  AdmRemint: 'NFTMinted',
+  ScoreUpd: 'ScoreUpdated',
+  Seized: 'NFTSeized',
+  NftBurned: 'NFTBurned',
+  MinScore: 'MinScoreUpdated',
+  GovProp: 'ProposalCreated',
+  GovAppr: 'ProposalApproved',
+  GovFin: 'ProposalFinalized',
+  GovCncl: 'ProposalCancelled',
+  GovEmerg: 'ProposalCancelled',
+  GovExp: 'ProposalCancelled',
+  ColDep: 'CollateralDeposited',
+  ColRel: 'CollateralReleased',
+};
+
+const ADMIN_CONFIG_EVENT_TYPES: ReadonlySet<WebhookEventType> = new Set([
+  'MinScoreUpdated',
+  'InterestRateUpdated',
+  'DefaultTermUpdated',
+  'TermLimitsUpdated',
+  'LateFeeRateUpdated',
+  'GracePeriodUpdated',
+  'DefaultWindowUpdated',
+  'MaxLoanAmountUpdated',
+  'MinRepaymentUpdated',
+  'MaxLoansPerBorrower',
+  'MinRateBpsUpdated',
+  'MaxRateBpsUpdated',
+  'RateOracleUpdated',
+]);
+
+export interface SorobanRawEvent {
   id: string;
   pagingToken: string;
   topic: xdr.ScVal[];
@@ -20,10 +60,37 @@ interface SorobanRawEvent {
   contractId: string;
 }
 
-interface LoanEvent extends IndexedLoanEvent {
+/**
+ * The loan manager's accrual snapshot (#1382).
+ *
+ * The loan manager publishes an `accrue` event whenever it settles an
+ * accrual window. The payload carries the loan's cumulative index, the index
+ * delta of the window, the interest the window produced and the sub-stroop
+ * residual that was carried into the next window.
+ */
+interface ParsedAccrueEvent {
+  eventId: string;
+  loanId: number;
+  ledger: number;
+  indexValue: string;
+  indexDelta: string;
+  interestDelta: string;
+  residual: string;
+  txHash: string;
+}
+
+interface ContractEvent extends IndexedLoanEvent {
   amount?: string;
   loanId?: number;
-  borrower: string;
+  address?: string;
+  /**
+   * Admin address captured from the LoanApprv event topic[1].
+   * Used to record the approving admin in audit_logs (actor field).
+   * Only populated for LoanApprv events.
+   */
+  adminAddress?: string;
+  /** Borrower refund amount decoded from a LoanLiquidated event value tuple (index 2). */
+  borrowerRefund?: string;
   ledger: number;
   ledgerClosedAt: Date;
   txHash: string;
@@ -32,11 +99,15 @@ interface LoanEvent extends IndexedLoanEvent {
   value: string;
   interestRateBps?: number;
   termLedgers?: number;
+  /** Absolute on-chain due ledger emitted by LoanExtended. */
+  dueLedger?: number;
 }
 
 interface EventIndexerConfig {
   rpcUrl: string;
-  contractId: string;
+  contractId?: string;
+  contractIds?: string[];
+  contractConfigs?: Array<{ contractId: string }>;
   pollIntervalMs?: number;
   batchSize?: number;
 }
@@ -53,48 +124,103 @@ interface ProcessChunkResult {
 
 export class EventIndexer {
   private readonly rpc: SorobanRpc.Server;
-  private readonly contractId: string;
+  private readonly contractIds: string[];
   private readonly pollIntervalMs: number;
   private readonly batchSize: number;
+  private readonly quarantineAlertThreshold: number;
+  private lastObservedQuarantineCount = 0;
   private running = false;
   private pollTimeout: NodeJS.Timeout | null = null;
+  private activePollPromise: Promise<void> | null = null;
 
   constructor(config: EventIndexerConfig);
   constructor(rpcUrl: string, contractId: string);
   constructor(configOrRpcUrl: EventIndexerConfig | string, contractId?: string) {
-    if (typeof configOrRpcUrl === "string") {
+    const thresholdRaw = Number.parseInt(process.env.QUARANTINE_ALERT_THRESHOLD ?? '25', 10);
+    this.quarantineAlertThreshold =
+      Number.isFinite(thresholdRaw) && thresholdRaw > 0 ? thresholdRaw : 25;
+
+    if (typeof configOrRpcUrl === 'string') {
       if (!contractId) {
-        throw new Error("contractId is required when using rpcUrl constructor");
+        throw new Error('contractId is required when using rpcUrl constructor');
       }
       this.rpc = new SorobanRpc.Server(configOrRpcUrl);
-      this.contractId = contractId;
+      this.contractIds = [contractId];
       this.pollIntervalMs = 30_000;
       this.batchSize = 100;
       return;
     }
 
     this.rpc = new SorobanRpc.Server(configOrRpcUrl.rpcUrl);
-    this.contractId = configOrRpcUrl.contractId;
+    const configuredIds = configOrRpcUrl.contractIds ?? [];
+    const configuredFromObjects = (configOrRpcUrl.contractConfigs ?? []).map(
+      (config) => config.contractId,
+    );
+    const normalized = [
+      ...configuredFromObjects,
+      ...configuredIds,
+      ...(configOrRpcUrl.contractId ? [configOrRpcUrl.contractId] : []),
+    ].filter(Boolean);
+    if (normalized.length === 0) {
+      throw new Error('At least one contractId must be configured for indexer');
+    }
+    this.contractIds = [...new Set(normalized)];
     this.pollIntervalMs = configOrRpcUrl.pollIntervalMs ?? 30_000;
     this.batchSize = configOrRpcUrl.batchSize ?? 100;
   }
 
+  async ingestRawEvents(events: SorobanRawEvent[]): Promise<StoreEventsResult> {
+    return this.storeEvents(events);
+  }
+
+  isEventParseable(event: SorobanRawEvent): boolean {
+    try {
+      return this.parseEvent(event) !== null;
+    } catch {
+      return false;
+    }
+  }
+
   async start(): Promise<void> {
     if (this.running) {
-      logger.warn("Indexer start requested while already running");
+      logger.withContext().warn('Indexer start requested while already running');
       return;
     }
 
     this.running = true;
-    await this.pollOnce();
+
+    try {
+      this.activePollPromise = this.pollOnce();
+      await this.activePollPromise;
+    } catch (error) {
+      logger.withContext().error('Indexer initial poll failed, will retry on next cycle', {
+        error,
+      });
+      // Keep running=true so scheduleNextPoll will still fire; reset the
+      // promise so stop() does not await a rejected promise indefinitely.
+      this.activePollPromise = null;
+      this.scheduleNextPoll();
+      return;
+    }
+
+    this.activePollPromise = null;
     this.scheduleNextPoll();
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.running = false;
     if (this.pollTimeout) {
       clearTimeout(this.pollTimeout);
       this.pollTimeout = null;
+    }
+    if (this.activePollPromise) {
+      try {
+        await this.activePollPromise;
+      } catch (error) {
+        logger.withContext().warn('Indexer stop awaited a failing poll iteration', { error });
+      } finally {
+        this.activePollPromise = null;
+      }
     }
   }
 
@@ -103,7 +229,10 @@ export class EventIndexer {
     return chunkResult.lastProcessedLedger;
   }
 
-  async reindexRange(fromLedger: number, toLedger: number): Promise<{
+  async reindexRange(
+    fromLedger: number,
+    toLedger: number,
+  ): Promise<{
     fromLedger: number;
     toLedger: number;
     fetchedEvents: number;
@@ -138,11 +267,17 @@ export class EventIndexer {
     if (!this.running) return;
 
     this.pollTimeout = setTimeout(async () => {
+      let pollPromise: Promise<void> | null = null;
       try {
-        await this.pollOnce();
+        pollPromise = this.pollOnce();
+        this.activePollPromise = pollPromise;
+        await pollPromise;
       } catch (error) {
-        logger.error("Indexer poll iteration failed", { error });
+        logger.withContext().error('Indexer poll iteration failed', { error });
       } finally {
+        if (this.activePollPromise === pollPromise) {
+          this.activePollPromise = null;
+        }
         this.scheduleNextPoll();
       }
     }, this.pollIntervalMs);
@@ -151,77 +286,172 @@ export class EventIndexer {
   private async pollOnce(): Promise<void> {
     if (!this.running) return;
 
-    const lastIndexedLedger = await this.getLastIndexedLedger();
     const latestLedger = await this.getLatestLedgerSequence();
 
-    if (latestLedger <= lastIndexedLedger) {
+    // latestLedger === 0 means getLatestLedgerSequence failed (RPC error or
+    // non-finite response).  Publishing lag=0 / chainTip=0 during an outage
+    // would silently defeat the behind-chain-tip alert, so skip the metric
+    // update and leave gauges at their last known values.
+    if (latestLedger === 0) {
       return;
     }
 
-    const fromLedger = lastIndexedLedger + 1;
-    const toLedger = Math.min(fromLedger + this.batchSize - 1, latestLedger);
+    for (const contractId of this.contractIds) {
+      const lastIndexedLedger = await this.getLastIndexedLedger(contractId);
 
-    const result = await this.processChunk(fromLedger, toLedger);
-    await this.updateLastIndexedLedger(result.lastProcessedLedger);
+      if (latestLedger <= lastIndexedLedger) {
+        recordIndexerLedgers(lastIndexedLedger, latestLedger);
+        continue;
+      }
+
+      const fromLedger = lastIndexedLedger + 1;
+      const toLedger = Math.min(fromLedger + this.batchSize - 1, latestLedger);
+
+      const result = await this.processChunk(fromLedger, toLedger, contractId);
+      await this.recordCheckpoint(contractId, fromLedger, result.lastProcessedLedger);
+      await this.updateLastIndexedLedger(contractId, result.lastProcessedLedger);
+      recordIndexerLedgers(result.lastProcessedLedger, latestLedger);
+    }
+  }
+
+  /**
+   * Contiguous-cursor invariant (issue #1376): records the ledger range this
+   * poll iteration just requested, and flags a gap when it doesn't
+   * immediately follow the previously-recorded range for this contract.
+   *
+   * This does NOT prove every ledger in `rangeStart..rangeEnd` was scanned —
+   * only that `processChunk` was invoked for that exact range and returned
+   * without error. What it catches is the specific failure mode in the
+   * issue: `fromLedger` being derived from a value that skips ahead of what
+   * was actually verified (a stale/clamped starting point), which the old
+   * code had no way to detect since it only ever looked at the *current*
+   * chunk, never compared it against the *previous* one.
+   *
+   * Reorg detection (re-reading a suspect/verified range and comparing a
+   * content digest) is intentionally out of scope here — see this change's
+   * PR description.
+   */
+  private async recordCheckpoint(
+    contract: string,
+    rangeStart: number,
+    rangeEnd: number,
+  ): Promise<void> {
+    const previous = await query(
+      `SELECT range_end
+       FROM ledger_checkpoints
+       WHERE contract = $1
+       ORDER BY range_end DESC
+       LIMIT 1`,
+      [contract],
+    );
+
+    const previousRangeEnd = previous.rows.length ? Number(previous.rows[0]?.range_end ?? 0) : null;
+
+    if (previousRangeEnd !== null && rangeStart > previousRangeEnd + 1) {
+      const gapStart = previousRangeEnd + 1;
+      const gapEnd = rangeStart - 1;
+      logger.withContext().warn('Indexer gap detected: ledger range was never scanned', {
+        contract,
+        gapStart,
+        gapEnd,
+      });
+      await query(
+        `INSERT INTO ledger_checkpoints (contract, range_start, range_end, status)
+         VALUES ($1, $2, $3, 'suspect')`,
+        [contract, gapStart, gapEnd],
+      );
+    }
+
+    await query(
+      `INSERT INTO ledger_checkpoints (contract, range_start, range_end, status)
+       VALUES ($1, $2, $3, 'verified')`,
+      [contract, rangeStart, rangeEnd],
+    );
+  }
+
+  /**
+   * Suspect (potentially-skipped) ledger ranges recorded for this contract,
+   * oldest first. Exposed so a consumer (an ops endpoint, or eventually
+   * defaultChecker.ts) can refuse to trust conclusions drawn from events in
+   * these ranges until they're backfilled and reconciled.
+   */
+  async getSuspectRanges(
+    contract: string = this.getContractId(),
+  ): Promise<Array<{ rangeStart: number; rangeEnd: number }>> {
+    const result = await query(
+      `SELECT range_start, range_end
+       FROM ledger_checkpoints
+       WHERE contract = $1 AND status = 'suspect'
+       ORDER BY range_start ASC`,
+      [contract],
+    );
+    return result.rows.map((row) => ({
+      rangeStart: Number(row.range_start),
+      rangeEnd: Number(row.range_end),
+    }));
   }
 
   private async getLatestLedgerSequence(): Promise<number> {
     try {
-      const latest = (await (this.rpc as unknown as {
-        getLatestLedger: () => Promise<Record<string, unknown>>;
-      }).getLatestLedger()) as Record<string, unknown>;
+      const latest = (await (
+        this.rpc as unknown as {
+          getLatestLedger: () => Promise<Record<string, unknown>>;
+        }
+      ).getLatestLedger()) as Record<string, unknown>;
 
-      const candidate =
-        latest.sequence ?? latest.sequenceNumber ?? latest.seq ?? latest.id;
+      const candidate = latest.sequence ?? latest.sequenceNumber ?? latest.seq ?? latest.id;
       const sequence = Number(candidate);
 
       return Number.isFinite(sequence) && sequence > 0 ? sequence : 0;
     } catch (error) {
-      logger.warn("Failed to fetch latest ledger sequence", { error });
+      logger.withContext().warn('Failed to fetch latest ledger sequence', { error });
       return 0;
     }
   }
 
-  private async getLastIndexedLedger(): Promise<number> {
+  private getContractId(): string {
+    return this.contractIds[0] ?? 'default';
+  }
+
+  private async getLastIndexedLedger(contract: string = this.getContractId()): Promise<number> {
     const result = await query(
-      `SELECT last_indexed_ledger
+      `SELECT last_ledger
        FROM indexer_state
+       WHERE contract = $1
        ORDER BY id DESC
        LIMIT 1`,
-      [],
+      [contract],
     );
 
     if (!result.rows.length) {
       await query(
-        `INSERT INTO indexer_state (last_indexed_ledger)
-         VALUES (0)`,
-        [],
+        `INSERT INTO indexer_state (contract, last_ledger)
+         VALUES ($1, 0)`,
+        [contract],
       );
       return 0;
     }
 
-    return Number(result.rows[0]?.last_indexed_ledger ?? 0);
+    return Number(result.rows[0]?.last_ledger ?? 0);
   }
 
-  private async updateLastIndexedLedger(ledger: number): Promise<void> {
+  private async updateLastIndexedLedger(
+    contract: string = this.getContractId(),
+    ledger: number,
+  ): Promise<void> {
     const updateResult = await query(
       `UPDATE indexer_state
-       SET last_indexed_ledger = GREATEST(last_indexed_ledger, $1),
+       SET last_ledger = GREATEST(last_ledger, $1),
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = (
-         SELECT id
-         FROM indexer_state
-         ORDER BY id DESC
-         LIMIT 1
-       )`,
-      [ledger],
+       WHERE contract = $2`,
+      [ledger, contract],
     );
 
     if ((updateResult.rowCount ?? 0) === 0) {
       await query(
-        `INSERT INTO indexer_state (last_indexed_ledger)
-         VALUES ($1)`,
-        [ledger],
+        `INSERT INTO indexer_state (contract, last_ledger)
+         VALUES ($1, $2)`,
+        [contract, ledger],
       );
     }
   }
@@ -229,20 +459,25 @@ export class EventIndexer {
   private async processChunk(
     startLedger: number,
     endLedger: number,
+    contractId: string = this.getContractId(),
   ): Promise<ProcessChunkResult> {
     const correlationId = `indexer-${createRequestId()}`;
 
     return runWithRequestContext(correlationId, async () => {
       if (endLedger < startLedger) {
+        logger.withContext().warn('Skipping invalid ledger range', {
+          startLedger,
+          endLedger,
+        });
         return {
-          lastProcessedLedger: endLedger,
+          lastProcessedLedger: Math.max(startLedger - 1, 0),
           fetchedEvents: 0,
           insertedEvents: 0,
         };
       }
 
       try {
-        const events = await this.fetchEventsInRange(startLedger, endLedger);
+        const events = await this.fetchEventsInRange(startLedger, endLedger, contractId);
         if (events.length === 0) {
           return {
             lastProcessedLedger: endLedger,
@@ -257,7 +492,7 @@ export class EventIndexer {
           startLedger,
         );
 
-        logger.info("Indexer processed chunk", {
+        logger.withContext().info('Indexer processed chunk', {
           startLedger,
           endLedger,
           fetchedEvents: events.length,
@@ -270,7 +505,7 @@ export class EventIndexer {
           insertedEvents: storeResult.insertedCount,
         };
       } catch (error) {
-        logger.error("Error processing event chunk", {
+        logger.withContext().error('Error processing event chunk', {
           startLedger,
           endLedger,
           error,
@@ -283,6 +518,7 @@ export class EventIndexer {
   private async fetchEventsInRange(
     startLedger: number,
     endLedger: number,
+    contractId: string,
   ): Promise<SorobanRawEvent[]> {
     const result: SorobanRawEvent[] = [];
     let cursor: string | undefined;
@@ -296,8 +532,8 @@ export class EventIndexer {
         limit: this.batchSize,
         filters: [
           {
-            type: "contract",
-            contractIds: [this.contractId],
+            type: 'contract',
+            contractIds: [contractId],
           },
         ],
       } as never)) as unknown as {
@@ -321,41 +557,67 @@ export class EventIndexer {
       cursor = nextCursor;
     }
 
-    return result;
+    // Sort events by ledger to ensure consistent processing order
+    return result.sort((a, b) => Number(a.ledger) - Number(b.ledger));
   }
 
   private async storeEvents(events: SorobanRawEvent[]): Promise<StoreEventsResult> {
-    const parsedEvents: LoanEvent[] = [];
+    const parsedEvents: ContractEvent[] = [];
+    let quarantineAttempts = 0;
+
+    const accrueEvents: ParsedAccrueEvent[] = [];
 
     for (const event of events) {
       try {
+        const accrue = this.parseAccrueEvent(event);
+        if (accrue) {
+          accrueEvents.push(accrue);
+          continue;
+        }
         const parsed = this.parseEvent(event);
         if (parsed) {
           parsedEvents.push(parsed);
         }
       } catch (error) {
-        logger.warn("Failed to parse event", {
+        logger.withContext().warn('Failed to parse event', {
           eventId: event.id,
           error,
         });
+        quarantineAttempts += 1;
+        await this.quarantineEvent(event, error);
       }
     }
 
-    if (parsedEvents.length === 0) {
+    if (quarantineAttempts > 0) {
+      await this.logQuarantineGrowth(quarantineAttempts);
+    }
+
+    // The accrual snapshots live in their own table: they are the contract's
+    // own numbers and the backend replays them to reproduce the on-chain
+    // accrual off-chain.
+    if (accrueEvents.length > 0) {
+      await this.storeAccrueEvents(accrueEvents);
+    }
+
+    if (parsedEvents.length === 0 && accrueEvents.length === 0) {
       return { insertedCount: 0 };
     }
 
-    const insertedEvents: LoanEvent[] = [];
+    const insertedEvents: ContractEvent[] = [];
 
-    await query("BEGIN", []);
-    try {
+    // Collect score deltas per user within the transaction so that the score
+    // upsert is atomic with the event inserts. A single bulk upsert at the
+    // end avoids N+1 queries and keeps scores within [300, 850].
+    const scoreUpdates: Map<string, number> = new Map();
+
+    await withTransaction(async (client: PoolClient) => {
       for (const event of parsedEvents) {
-        const insertResult = await query(
-          `INSERT INTO loan_events (
+        const insertResult = await client.query(
+          `INSERT INTO contract_events (
             event_id,
             event_type,
             loan_id,
-            borrower,
+            address,
             amount,
             ledger,
             ledger_closed_at,
@@ -364,16 +626,17 @@ export class EventIndexer {
             topics,
             value,
             interest_rate_bps,
-            term_ledgers
+            term_ledgers,
+            due_ledger
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-          ON CONFLICT (event_id) DO NOTHING
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+          ON CONFLICT DO NOTHING
           RETURNING event_id`,
           [
             event.eventId,
             event.eventType,
             event.loanId ?? null,
-            event.borrower || null,
+            event.address ?? null,
             event.amount ?? null,
             event.ledger,
             event.ledgerClosedAt,
@@ -383,28 +646,102 @@ export class EventIndexer {
             event.value,
             event.interestRateBps ?? null,
             event.termLedgers ?? null,
+            event.dueLedger ?? null,
           ],
         );
 
         if ((insertResult.rowCount ?? 0) > 0) {
           insertedEvents.push(event);
-          if (event.eventType === "LoanRepaid") {
-            await this.updateUserScore(event.borrower, 15);
-          } else if (event.eventType === "LoanDefaulted") {
-            await this.updateUserScore(event.borrower, -50);
+
+          if (this.isAdminConfigEventType(event.eventType)) {
+            await client.query(
+              `INSERT INTO audit_logs (actor, action, target, payload, ip_address, status)
+               VALUES ($1, $2, $3, $4::jsonb, $5, $6)`,
+              [
+                event.address ?? 'SYSTEM',
+                `ADMIN_CONFIG_${event.eventType}`,
+                `contract:${event.contractId}`,
+                JSON.stringify({
+                  eventId: event.eventId,
+                  eventType: event.eventType,
+                  loanId: event.loanId ?? null,
+                  amount: event.amount ?? null,
+                  ledger: event.ledger,
+                  txHash: event.txHash,
+                }),
+                'internal-indexer',
+                200,
+              ],
+            );
+          }
+
+          /**
+           * LoanApprv audit row — records which admin approved a loan.
+           *
+           * audit_logs shape:
+           *   actor     — admin Stellar address (topic[1] of the LoanApprv event)
+           *   action    — 'loan_approved'
+           *   target    — 'loan:<loanId>'
+           *   payload   — { eventId, loanId, borrower, txHash }
+           *   ip_address — null (on-chain action, no HTTP request IP)
+           */
+          if (event.eventType === 'LoanApprv') {
+            await client.query(
+              `INSERT INTO audit_logs (actor, action, target, payload, ip_address, status)
+               VALUES ($1, $2, $3, $4::jsonb, $5, $6)`,
+              [
+                event.adminAddress ?? 'SYSTEM',
+                'loan_approved',
+                `loan:${event.loanId ?? 'unknown'}`,
+                JSON.stringify({
+                  eventId: event.eventId,
+                  loanId: event.loanId ?? null,
+                  borrower: event.address ?? null,
+                  txHash: event.txHash,
+                }),
+                null,
+                200, // Loan approved on-chain
+              ],
+            );
+          }
+
+          // Aggregate score deltas per borrower; a single bulk upsert at
+          // the end of the transaction avoids N+1 score updates.
+          if (event.eventType === 'LoanRepaid') {
+            const { repaymentDelta } = sorobanService.getScoreConfig();
+            if (event.address) {
+              scoreUpdates.set(
+                event.address,
+                (scoreUpdates.get(event.address) ?? 0) + repaymentDelta,
+              );
+            }
+          } else if (
+            event.eventType === 'LoanDefaulted' ||
+            event.eventType === 'CollateralLiquidated'
+          ) {
+            const { defaultPenalty } = sorobanService.getScoreConfig();
+            if (event.address) {
+              scoreUpdates.set(
+                event.address,
+                (scoreUpdates.get(event.address) ?? 0) - defaultPenalty,
+              );
+            }
           }
         }
       }
 
-      await query("COMMIT", []);
-    } catch (error) {
-      await query("ROLLBACK", []);
-      throw error;
-    }
+      // Apply batched score updates on the same pinned client so that both
+      // the event inserts and the score changes are committed or rolled back
+      // together — satisfying the atomicity requirement.
+      if (scoreUpdates.size > 0) {
+        await updateUserScoresBulk(scoreUpdates, client);
+      }
+    });
+    // withTransaction commits here; any error triggers automatic ROLLBACK
 
     for (const event of insertedEvents) {
       webhookService.dispatch(event).catch((error) => {
-        logger.error("Webhook dispatch failed", {
+        logger.withContext().error('Webhook dispatch failed', {
           eventId: event.eventId,
           error,
         });
@@ -414,19 +751,33 @@ export class EventIndexer {
         eventId: event.eventId,
         eventType: event.eventType,
         ...(event.loanId !== undefined ? { loanId: event.loanId } : {}),
-        borrower: event.borrower,
-        ...(event.amount !== undefined ? { amount: event.amount } : {}),
+        address: event.address,
+        // Carry both the raw stroop string (exact, for settlement/tx logic)
+        // and a display string derived from the same money policy used
+        // everywhere else, so SSE consumers never have to re-derive a
+        // display amount themselves (which is how the frontend previously
+        // ended up doing `Number(stroops) / 1e7` with its own rounding).
+        ...(event.amount !== undefined
+          ? { amount: event.amount, amountDisplay: fromStroops(BigInt(event.amount)) }
+          : {}),
         ledger: event.ledger,
         ledgerClosedAt: event.ledgerClosedAt.toISOString(),
         txHash: event.txHash,
       });
 
       this.triggerNotification(event).catch((error) => {
-        logger.error("Notification trigger failed", {
+        logger.withContext().error('Notification trigger failed', {
           eventId: event.eventId,
           error,
         });
       });
+
+      // Handle pause/unpause events to update global pause state
+      if (event.eventType === 'PoolPaused') {
+        await setPauseState(true, [event.contractId], 'Emergency pause triggered by contract');
+      } else if (event.eventType === 'PoolUnpaused') {
+        await setPauseState(false, [], 'Contract pause lifted');
+      }
     }
 
     return {
@@ -434,125 +785,461 @@ export class EventIndexer {
     };
   }
 
-  private parseEvent(event: SorobanRawEvent): LoanEvent | null {
+  /**
+   * Parse the loan manager's `accrue` event.
+   *
+   * The event is not a webhook event, so it is handled outside the regular
+   * event pipeline: it is stored in the `interest_index` table and used to
+   * reproduce the contract's accrual off-chain.
+   */
+  private parseAccrueEvent(event: SorobanRawEvent): ParsedAccrueEvent | null {
+    const type = event.topic[0]?.sym?.().toString();
+    if (type !== 'accrue') {
+      return null;
+    }
+    if (!event.topic[1]) {
+      throw new Error(`accrue event missing loan_id: ${event.id}`);
+    }
+    const loanId = this.decodeLoanId(event.topic[1]);
+    if (loanId === undefined) {
+      throw new Error(`accrue event has an invalid loan_id: ${event.id}`);
+    }
+
+    const data = scValToNative(event.value);
+    if (!Array.isArray(data) || data.length < 4) {
+      throw new Error(`accrue event missing its index payload: ${event.id}`);
+    }
+
+    const toIntegerString = (value: unknown, field: string): string => {
+      if (typeof value === 'bigint' || (typeof value === 'number' && Number.isInteger(value))) {
+        return BigInt(value).toString();
+      }
+      throw new Error(`accrue event has an invalid ${field}: ${event.id}`);
+    };
+
+    return {
+      eventId: event.id,
+      loanId,
+      ledger: Number(event.ledger),
+      indexValue: toIntegerString(data[0], 'index'),
+      indexDelta: toIntegerString(data[1], 'index_delta'),
+      interestDelta: toIntegerString(data[2], 'interest_delta'),
+      residual: toIntegerString(data[3], 'residual'),
+      txHash: event.txHash,
+    };
+  }
+
+  /**
+   * Persist the accrual snapshots.
+   *
+   * The insert is idempotent (one row per accrue event) and runs in its own
+   * transaction so a missing `interest_index` table cannot roll back the
+   * events that were indexed alongside it.
+   */
+  private async storeAccrueEvents(accrueEvents: ParsedAccrueEvent[]): Promise<void> {
+    try {
+      await withTransaction(async (client: PoolClient) => {
+        for (const accrue of accrueEvents) {
+          await client.query(
+            `INSERT INTO interest_index (
+              loan_id,
+              ledger,
+              index_value,
+              index_delta,
+              interest_delta,
+              residual,
+              event_id,
+              tx_hash
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (event_id) DO NOTHING`,
+            [
+              accrue.loanId,
+              accrue.ledger,
+              accrue.indexValue,
+              accrue.indexDelta,
+              accrue.interestDelta,
+              accrue.residual,
+              accrue.eventId,
+              accrue.txHash,
+            ],
+          );
+        }
+      });
+    } catch (error) {
+      logger.withContext().warn('Failed to store accrual index snapshots', {
+        error,
+        count: accrueEvents.length,
+      });
+    }
+  }
+
+  private parseEvent(event: SorobanRawEvent): ContractEvent | null {
     const type = this.decodeEventType(event.topic[0]);
     if (!type) return null;
 
-    let borrower = "";
     let loanId: number | undefined;
+    let address: string | undefined;
     let amount: string | undefined;
     let interestRateBps: number | undefined;
     let termLedgers: number | undefined;
+    let dueLedger: number | undefined;
+    let borrowerRefund: string | undefined;
 
-    if (type === "LoanRequested") {
-      if (!event.topic[1]) return null;
-      borrower = this.decodeAddress(event.topic[1]);
-      amount = this.decodeAmount(event.value);
-    } else if (type === "LoanApproved") {
-      if (!event.topic[1]) return null;
+    if (type === 'LoanRequested') {
+      // (type, loan_id, borrower), amount
+      if (!event.topic[1] || !event.topic[2]) return null;
       loanId = this.decodeLoanId(event.topic[1]);
       if (loanId === undefined) return null;
-      interestRateBps = 1200;
-      termLedgers = 17280;
-    } else if (type === "LoanRepaid") {
+      address = this.decodeAddress(event.topic[2]);
+      amount = this.decodeAmount(event.value);
+    } else if (type === 'LoanApproved') {
+      // (type, loan_id, borrower), [interest_rate_bps, term_ledgers]
       if (!event.topic[1] || !event.topic[2]) return null;
-      borrower = this.decodeAddress(event.topic[1]);
+      loanId = this.decodeLoanId(event.topic[1]);
+      if (loanId === undefined) return null;
+      address = this.decodeAddress(event.topic[2]);
+
+      const data = scValToNative(event.value);
+      if (!Array.isArray(data) || data.length < 2) {
+        throw new Error(
+          `LoanApproved event missing interest_rate_bps or term_ledgers: ${event.id}`,
+        );
+      }
+
+      interestRateBps = Number(data[0]);
+      termLedgers = Number(data[1]);
+
+      if (!Number.isFinite(interestRateBps)) {
+        throw new Error(`LoanApproved event has invalid interest_rate_bps: ${event.id}`);
+      }
+      if (!Number.isFinite(termLedgers)) {
+        throw new Error(`LoanApproved event has invalid term_ledgers: ${event.id}`);
+      }
+    } else if (type === 'LoanRepaid') {
+      if (!event.topic[1] || !event.topic[2]) return null;
+      address = this.decodeAddress(event.topic[1]);
       loanId = this.decodeLoanId(event.topic[2]);
       amount = this.decodeAmount(event.value);
-    } else if (type === "LoanDefaulted") {
+    } else if (type === 'LoanDefaulted') {
       if (!event.topic[1]) return null;
       loanId = this.decodeLoanId(event.topic[1]);
       if (loanId === undefined) return null;
-      borrower = this.decodeAddress(event.value);
-    } else if (type === "Seized") {
+      address = this.decodeAddress(event.value);
+    } else if (type === 'CollateralLiquidated') {
       if (!event.topic[1]) return null;
-      borrower = this.decodeAddress(event.topic[1]);
+      loanId = this.decodeLoanId(event.topic[1]);
+      if (loanId === undefined) return null;
+      amount = this.decodeAmount(event.value);
+    } else if (type === 'Deposit' || type === 'Withdraw' || type === 'EmergencyWithdraw') {
+      if (!event.topic[1]) return null;
+      address = this.decodeAddress(event.topic[1]);
+      // LP events have (amount, shares) in value
+      amount = this.decodeTupleFirstNumericValue(event.value);
+    } else if (
+      type === 'NFTMinted' ||
+      type === 'ScoreUpdated' ||
+      type === 'NFTSeized' ||
+      type === 'NFTBurned'
+    ) {
+      if (!event.topic[1]) return null;
+      address = this.decodeAddress(event.topic[1]);
+      if (type === 'NFTMinted' || type === 'ScoreUpdated') {
+        amount = this.decodeAmount(event.value);
+      }
+    } else if (
+      type === 'ProposalCreated' ||
+      type === 'ProposalApproved' ||
+      type === 'ProposalFinalized' ||
+      type === 'ProposalCancelled'
+    ) {
+      if (!event.topic[1]) return null;
+      address = this.decodeAddress(event.topic[1]);
+    } else if (type === 'Transfer') {
+      // (from, to), ()
+      if (event.topic[2]) {
+        address = this.decodeAddress(event.topic[2]);
+      }
+    } else if (type === 'LoanRefinanced') {
+      // (type, loan_id, borrower), [new_amount, new_term]
+      if (!event.topic[1] || !event.topic[2]) return null;
+      loanId = this.decodeLoanId(event.topic[1]);
+      address = this.decodeAddress(event.topic[2]);
+      amount = this.decodeTupleFirstNumericValue(event.value);
+    } else if (type === 'LoanExtended') {
+      // (type, loan_id, borrower), [new_due_ledger, fee_amount, extension_count]
+      if (!event.topic[1] || !event.topic[2]) return null;
+      loanId = this.decodeLoanId(event.topic[1]);
+      address = this.decodeAddress(event.topic[2]);
+      const data = scValToNative(event.value);
+      if (Array.isArray(data) && data.length >= 2) {
+        dueLedger = Number(data[0]);
+        amount = data[1].toString();
+      }
+      if (!Number.isSafeInteger(dueLedger) || dueLedger! <= 0) {
+        throw new Error(`LoanExtended event has invalid new_due_ledger: ${event.id}`);
+      }
+    } else if (type === 'LoanCancelled') {
+      // (type, borrower), loan_id
+      if (!event.topic[1]) return null;
+      address = this.decodeAddress(event.topic[1]);
+      loanId = this.decodeLoanId(event.value);
+    } else if (type === 'LoanRejected') {
+      // (type, loan_id), reason
+      if (!event.topic[1]) return null;
+      loanId = this.decodeLoanId(event.topic[1]);
+    } else if (type === 'LateFeeCharged') {
+      // (type, loan_id), amount
+      if (!event.topic[1]) return null;
+      loanId = this.decodeLoanId(event.topic[1]);
+      amount = this.decodeAmount(event.value);
+    } else if (type === 'CollateralReturned') {
+      // (type, borrower, loan_id), amount
+      if (!event.topic[1] || !event.topic[2]) return null;
+      address = this.decodeAddress(event.topic[1]);
+      loanId = this.decodeLoanId(event.topic[2]);
+      amount = this.decodeAmount(event.value);
+    } else if (type === 'YieldDistributed' || type === 'DepositCapUpdated') {
+      // (type, token), amount / [old, new]
+      if (!event.topic[1]) return null;
+      address = this.decodeAddress(event.topic[1]);
+      if (type === 'YieldDistributed') {
+        amount = this.decodeAmount(event.value);
+      } else {
+        const data = scValToNative(event.value);
+        if (Array.isArray(data) && data.length >= 2) {
+          amount = data[1].toString();
+        }
+      }
+    } else if (type === 'WithdrawalCooldownUpdated') {
+      // (type), [old, new]
+      const data = scValToNative(event.value);
+      if (Array.isArray(data) && data.length >= 2) {
+        amount = data[1].toString();
+      }
+    } else if (type === 'MinScoreUpdated') {
+      // (type, admin), [old_score, new_score]
+      if (event.topic[1]) {
+        address = this.decodeAddress(event.topic[1]);
+      }
+      amount = this.decodeTupleSecondNumericValue(event.value);
+    } else if (type === 'InterestRateUpdated') {
+      // (type), [old_rate, new_rate]
+      amount = this.decodeTupleSecondNumericValue(event.value);
+    } else if (type === 'DefaultTermUpdated') {
+      // (type), [old_term, new_term]
+      amount = this.decodeTupleSecondNumericValue(event.value);
+    } else if (type === 'TermLimitsUpdated') {
+      // (type), [min_term, max_term]
+      amount = this.decodeTupleSecondNumericValue(event.value);
+    } else if (type === 'LateFeeRateUpdated') {
+      // (type, admin), [old_rate, new_rate]
+      if (event.topic[1]) {
+        address = this.decodeAddress(event.topic[1]);
+      }
+      amount = this.decodeTupleSecondNumericValue(event.value);
+    } else if (type === 'GracePeriodUpdated') {
+      // (type, admin), [old_ledgers, new_ledgers]
+      if (event.topic[1]) {
+        address = this.decodeAddress(event.topic[1]);
+      }
+      amount = this.decodeTupleSecondNumericValue(event.value);
+    } else if (type === 'DefaultWindowUpdated') {
+      // (type, admin), [old_ledgers, new_ledgers]
+      if (event.topic[1]) {
+        address = this.decodeAddress(event.topic[1]);
+      }
+      amount = this.decodeTupleSecondNumericValue(event.value);
+    } else if (type === 'MaxLoanAmountUpdated') {
+      // (type, admin), [old_amount, new_amount]
+      if (event.topic[1]) {
+        address = this.decodeAddress(event.topic[1]);
+      }
+      amount = this.decodeTupleSecondNumericValue(event.value);
+    } else if (type === 'MinRepaymentUpdated') {
+      // (type, admin), [old_amount, new_amount]
+      if (event.topic[1]) {
+        address = this.decodeAddress(event.topic[1]);
+      }
+      amount = this.decodeTupleSecondNumericValue(event.value);
+    } else if (type === 'MaxLoansPerBorrower') {
+      // (type, admin), [old_max, new_max]
+      if (event.topic[1]) {
+        address = this.decodeAddress(event.topic[1]);
+      }
+      amount = this.decodeTupleSecondNumericValue(event.value);
+    } else if (type === 'MinRateBpsUpdated') {
+      // (type, admin), [old_rate, new_rate]
+      if (event.topic[1]) {
+        address = this.decodeAddress(event.topic[1]);
+      }
+      amount = this.decodeTupleSecondNumericValue(event.value);
+    } else if (type === 'MaxRateBpsUpdated') {
+      // (type, admin), [old_rate, new_rate]
+      if (event.topic[1]) {
+        address = this.decodeAddress(event.topic[1]);
+      }
+      amount = this.decodeTupleSecondNumericValue(event.value);
+    } else if (type === 'RateOracleUpdated') {
+      // (type), [old_oracle, new_oracle]
+      address = this.decodeTupleSecondAddress(event.value);
+    } else if (type === 'PoolPaused' || type === 'PoolUnpaused') {
+      // (type)
+    } else if (type === 'CollateralDeposited' || type === 'CollateralReleased') {
+      // (type, borrower, loan_id), amount/()
+      if (event.topic[1]) {
+        address = this.decodeAddress(event.topic[1]);
+      }
+      if (event.topic[2]) {
+        loanId = this.decodeLoanId(event.topic[2]);
+      }
+      if (type === 'CollateralDeposited') {
+        amount = this.decodeAmount(event.value);
+      }
+    } else if (type === 'ScoreDecr') {
+      // (old_score, new_score, symbol)
+      if (!event.topic[1]) return null;
+      address = this.decodeAddress(event.topic[1]);
+      const data = scValToNative(event.value);
+      if (Array.isArray(data) && data.length >= 2) {
+        amount = data[1].toString();
+      }
+    } else if (type === 'LoanApprv') {
+      // (type, admin), (loan_id, borrower)
+      // topic[1] = admin address who approved the loan
+      const data = scValToNative(event.value);
+      if (Array.isArray(data) && data.length >= 2) {
+        loanId = Number(data[0]);
+        address = data[1].toString(); // borrower
+      }
+      // adminAddress is decoded separately and attached below
+    } else if (type === 'LoanLiquidated') {
+      // (type, loan_id, borrower, liquidator), (debt_repaid, liquidator_bonus, borrower_refund)
+      if (!event.topic[1] || !event.topic[2]) return null;
+      loanId = this.decodeLoanId(event.topic[1]);
+      address = this.decodeAddress(event.topic[2]);
+      amount = this.decodeTupleFirstNumericValue(event.value);
+      borrowerRefund = this.decodeTupleThirdNumericValue(event.value);
+    }
+
+    // Decode admin address for LoanApprv events (topic[1] = approving admin)
+    let adminAddress: string | undefined;
+    if (type === 'LoanApprv' && event.topic[1]) {
+      try {
+        adminAddress = this.decodeAddress(event.topic[1]);
+      } catch {
+        // Admin address decode failed; audit row will fall back to "SYSTEM"
+      }
     }
 
     return {
       eventId: event.id,
-      eventType: type,
+      eventType: type as WebhookEventType,
       ledger: event.ledger,
       ledgerClosedAt: new Date(event.ledgerClosedAt),
       txHash: event.txHash,
       contractId: event.contractId.toString(),
-      topics: event.topic.map((topic) => topic.toXDR("base64")),
-      value: event.value.toXDR("base64"),
+      topics: event.topic.map((topic) => topic.toXDR('base64')),
+      value: event.value.toXDR('base64'),
       ...(amount !== undefined ? { amount } : {}),
       ...(loanId !== undefined ? { loanId } : {}),
       ...(interestRateBps !== undefined ? { interestRateBps } : {}),
       ...(termLedgers !== undefined ? { termLedgers } : {}),
-      borrower,
+      ...(dueLedger !== undefined ? { dueLedger } : {}),
+      ...(address !== undefined ? { address } : {}),
+      ...(adminAddress !== undefined ? { adminAddress } : {}),
+      ...(borrowerRefund !== undefined ? { borrowerRefund } : {}),
     };
   }
 
-  private async updateUserScore(userId: string, delta: number): Promise<void> {
-    if (!userId) return;
-    try {
-      await query(
-        `INSERT INTO scores (user_id, current_score)
-         VALUES ($1, $2)
-         ON CONFLICT (user_id)
-         DO UPDATE SET
-           current_score = LEAST(850, GREATEST(300, scores.current_score + $3)),
-           updated_at = CURRENT_TIMESTAMP`,
-        [userId, 500 + delta, delta],
-      );
-      logger.info("Updated user score from indexed event", {
-        userId,
-        delta,
-      });
-    } catch (error) {
-      logger.error("Failed to update user score", { userId, error });
-    }
-  }
+  private async triggerNotification(event: ContractEvent): Promise<void> {
+    if (!event.address) return;
 
-  private async triggerNotification(event: LoanEvent): Promise<void> {
-    if (!event.borrower) return;
-
-    let type = "";
-    let title = "";
-    let message = "";
+    let type = '';
+    let title = '';
+    let message = '';
 
     switch (event.eventType) {
-      case "LoanApproved":
-        type = "loan_approved";
-        title = "Loan Approved";
+      case 'LoanApproved':
+        type = 'loan_approved';
+        title = 'Loan Approved';
         message = event.loanId
           ? `Your loan #${event.loanId} has been approved.`
-          : "Your loan has been approved.";
+          : 'Your loan has been approved.';
         break;
-      case "LoanRepaid":
-        type = "repayment_confirmed";
-        title = "Repayment Confirmed";
+      case 'LoanRepaid':
+        type = 'repayment_confirmed';
+        title = 'Repayment Confirmed';
         message = event.loanId
           ? `Repayment for loan #${event.loanId} has been confirmed.`
-          : "Your loan repayment has been confirmed.";
+          : 'Your loan repayment has been confirmed.';
         break;
-      case "LoanDefaulted":
-        type = "loan_defaulted";
-        title = "Loan Defaulted";
+      case 'LoanDefaulted':
+        type = 'loan_defaulted';
+        title = 'Loan Defaulted';
         message = event.loanId
           ? `Loan #${event.loanId} has been marked as defaulted.`
-          : "A loan has been marked as defaulted.";
+          : 'A loan has been marked as defaulted.';
         break;
+      case 'CollateralLiquidated':
+        type = 'loan_defaulted';
+        title = 'Collateral Seized';
+        message = event.loanId
+          ? `Collateral for loan #${event.loanId} has been seized due to default.`
+          : 'Collateral has been seized due to a loan default.';
+        break;
+      case 'LoanLiquidated': {
+        type = 'loan_liquidated';
+        title = 'Loan Liquidated';
+        const refundPart =
+          event.borrowerRefund && BigInt(event.borrowerRefund) > 0n
+            ? `A refund of ${event.borrowerRefund} has been returned to you.`
+            : 'No refund is owed.';
+        message = event.loanId
+          ? `Loan #${event.loanId} has been liquidated. Your debt has been cleared. ${refundPart}`
+          : `Your loan has been liquidated. Your debt has been cleared. ${refundPart}`;
+        break;
+      }
       default:
         return;
     }
 
-    await query(
-      `INSERT INTO notifications (user_id, type, title, message, loan_id)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [event.borrower, type, title, message, event.loanId ?? null],
-    );
+    await notificationService.createNotification({
+      userId: event.address,
+      type: type as NotificationType,
+      title,
+      message,
+      loanId: event.loanId,
+    });
   }
 
   private decodeAddress(value: xdr.ScVal): string {
-    return scValToNative(value).toString();
+    const native = scValToNative(value);
+    if (typeof native !== 'string') {
+      throw new Error(`Expected address string, got ${typeof native}: ${String(native)}`);
+    }
+    return native;
   }
 
+  /**
+   * Decode a stroop-denominated `i128` event field to its exact integer
+   * string representation.
+   *
+   * This is the money-policy boundary between the chain and the rest of the
+   * backend (see `backend/src/money/decimal.ts`): the value is converted to
+   * `bigint` and back to a string without ever passing through `Number`, so
+   * amounts beyond `Number.MAX_SAFE_INTEGER` (any XLM balance above ~90M
+   * stroops, i.e. ~9 XLM) cannot silently lose precision here.
+   */
   private decodeAmount(value: xdr.ScVal): string {
-    return scValToNative(value).toString();
+    const native = scValToNative(value);
+    if (typeof native === 'bigint') {
+      return native.toString();
+    }
+    if (typeof native === 'number' && Number.isInteger(native)) {
+      return BigInt(native).toString();
+    }
+    throw new Error(`Expected integer stroop amount, got ${typeof native}: ${String(native)}`);
   }
 
   private decodeLoanId(value: xdr.ScVal): number | undefined {
@@ -563,27 +1250,162 @@ export class EventIndexer {
     }
   }
 
+  private decodeTupleFirstNumericValue(value: xdr.ScVal): string | undefined {
+    const native = scValToNative(value);
+    if (!Array.isArray(native) || native.length === 0) {
+      return undefined;
+    }
+    const first = native[0];
+    if (typeof first === 'bigint' || typeof first === 'number') {
+      return first.toString();
+    }
+    return undefined;
+  }
+
+  private decodeTupleSecondNumericValue(value: xdr.ScVal): string | undefined {
+    const native = scValToNative(value);
+    if (!Array.isArray(native) || native.length < 2) {
+      return undefined;
+    }
+    const second = native[1];
+    if (typeof second === 'bigint' || typeof second === 'number') {
+      return second.toString();
+    }
+    return undefined;
+  }
+
+  private decodeTupleThirdNumericValue(value: xdr.ScVal): string | undefined {
+    const native = scValToNative(value);
+    if (!Array.isArray(native) || native.length < 3) {
+      return undefined;
+    }
+    const third = native[2];
+    if (typeof third === 'bigint' || typeof third === 'number') {
+      return third.toString();
+    }
+    return undefined;
+  }
+
+  private decodeTupleSecondAddress(value: xdr.ScVal): string | undefined {
+    const native = scValToNative(value);
+    if (!Array.isArray(native) || native.length < 2) {
+      return undefined;
+    }
+    const second = native[1];
+    if (typeof second === 'string') {
+      return second;
+    }
+    return undefined;
+  }
+
+  private isAdminConfigEventType(eventType: WebhookEventType): boolean {
+    return ADMIN_CONFIG_EVENT_TYPES.has(eventType);
+  }
+
+  private async quarantineEvent(event: SorobanRawEvent, error: unknown): Promise<void> {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+
+    let rawTopics: string[] = [];
+    let rawValue = '';
+    try {
+      rawTopics = event.topic.map((t) => t.toXDR('base64'));
+      rawValue = event.value.toXDR('base64');
+    } catch {
+      // XDR serialisation itself failed; store empty strings so the row is
+      // still inserted and the error_message captures the original failure.
+    }
+
+    const rawXdr = {
+      id: event.id,
+      topics: rawTopics,
+      value: rawValue,
+      ledger: event.ledger,
+      ledgerClosedAt: event.ledgerClosedAt,
+      txHash: event.txHash,
+      contractId: event.contractId,
+    };
+
+    logger.withContext().warn('Quarantining malformed event', {
+      eventId: event.id,
+      ledger: event.ledger,
+      txHash: event.txHash,
+      rawXdr,
+      error: errorMessage,
+    });
+
+    try {
+      await query(
+        `INSERT INTO quarantine_events (event_id, ledger, tx_hash, contract_id, raw_xdr, error_message)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (event_id) DO NOTHING`,
+        [
+          event.id,
+          event.ledger,
+          event.txHash,
+          event.contractId,
+          JSON.stringify(rawXdr),
+          errorMessage,
+        ],
+      );
+    } catch (dbError) {
+      logger.withContext().error('Failed to quarantine malformed event', {
+        eventId: event.id,
+        dbError,
+      });
+    }
+  }
+
+  private async logQuarantineGrowth(newlyQuarantined: number): Promise<void> {
+    try {
+      const result = await query('SELECT COUNT(*)::int AS count FROM quarantine_events', []);
+      const totalCount = Number(result.rows[0]?.count ?? 0);
+      const previousCount = this.lastObservedQuarantineCount;
+
+      if (totalCount > previousCount) {
+        logger.withContext().warn('Quarantine event count increased', {
+          previousCount,
+          totalCount,
+          delta: totalCount - previousCount,
+          newlyQuarantined,
+        });
+
+        if (
+          previousCount < this.quarantineAlertThreshold &&
+          totalCount >= this.quarantineAlertThreshold
+        ) {
+          logger.withContext().error('Quarantine event count exceeded alert threshold', {
+            threshold: this.quarantineAlertThreshold,
+            totalCount,
+          });
+        }
+      }
+
+      this.lastObservedQuarantineCount = Math.max(previousCount, totalCount);
+    } catch (error) {
+      logger.withContext().error('Failed to check quarantine event count', { error });
+    }
+  }
+
   private decodeEventType(value: xdr.ScVal | undefined): WebhookEventType | null {
     if (!value) return null;
 
     try {
-      const eventType = value.sym().toString();
-      const supported: string[] = [
-        "LoanRequested",
-        "LoanApproved",
-        "LoanRepaid",
-        "LoanDefaulted",
-        "Seized",
-        "Paused",
-        "Unpaused",
-        "MinScoreUpdated",
-      ];
+      const rawType = value.sym().toString();
+      const normalizedType = EVENT_TYPE_ALIASES[rawType] ?? rawType;
 
-      return supported.includes(eventType)
-        ? (eventType as WebhookEventType)
+      return SUPPORTED_WEBHOOK_EVENT_TYPES.includes(normalizedType as WebhookEventType)
+        ? (normalizedType as WebhookEventType)
         : null;
     } catch {
       return null;
     }
   }
 }
+
+// Re-exported for discoverability alongside `recordCheckpoint` /
+// `getSuspectRanges` above; the implementation lives in
+// ledgerCheckpoints.ts so consumers that only need the gate check (e.g.
+// defaultChecker.ts) don't pull in this module's heavier dependency graph
+// (Soroban RPC client, webhook/notification/event-stream services) — see
+// that file's doc comment.
+export { hasUnresolvedLedgerGaps } from './ledgerCheckpoints.js';

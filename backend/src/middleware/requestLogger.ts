@@ -1,25 +1,21 @@
-import type { Request, Response, NextFunction } from "express";
-import logger from "../utils/logger.js";
+import type { Request, Response, NextFunction } from 'express';
+import logger from '../utils/logger.js';
 
 /**
  * Middleware to log HTTP requests with structured fields for parsing and querying.
  * Logs method, url, statusCode, durationMs, and optional userAgent.
  */
-export const requestLogger = (
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): void => {
+export const requestLogger = (req: Request, res: Response, next: NextFunction): void => {
   const start = Date.now();
 
-  res.on("finish", () => {
+  res.on('finish', () => {
     const durationMs = Date.now() - start;
     const { method, originalUrl, ip } = req;
-    const userAgent = req.get("user-agent") ?? undefined;
+    const userAgent = req.get('user-agent') ?? undefined;
     const { statusCode } = res;
 
     const payload = {
-      requestId: req.requestId,
+      requestId: (req as any).requestId, // Safely handles custom middleware assignment
       method,
       url: originalUrl,
       statusCode,
@@ -29,11 +25,11 @@ export const requestLogger = (
     };
 
     if (statusCode >= 500) {
-      logger.error("HTTP request", payload);
+      logger.error('HTTP request', payload);
     } else if (statusCode >= 400) {
-      logger.warn("HTTP request", payload);
+      logger.warn('HTTP request', payload);
     } else {
-      logger.http("HTTP request", payload);
+      logger.http('HTTP request', payload);
     }
   });
 

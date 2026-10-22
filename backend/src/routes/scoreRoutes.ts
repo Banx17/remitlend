@@ -1,18 +1,25 @@
-import { Router } from "express";
+import { Router } from 'express';
 import {
   getScore,
   updateScore,
   getScoreBreakdown,
-} from "../controllers/scoreController.js";
-import { validate } from "../middleware/validation.js";
-import { getScoreSchema, updateScoreSchema } from "../schemas/scoreSchemas.js";
-import { requireApiKey } from "../middleware/auth.js";
-import { strictRateLimiter } from "../middleware/rateLimiter.js";
+  getOnChainScoreHistory,
+  getRemittanceNft,
+} from '../controllers/scoreController.js';
+import { validate } from '../middleware/validation.js';
+import {
+  getRemittanceNftSchema,
+  getScoreHistorySchema,
+  getScoreSchema,
+  updateScoreSchema,
+} from '../schemas/scoreSchemas.js';
+import { requireApiKey } from '../middleware/auth.js';
+import { scoreUpdateRateLimit } from '../middleware/rateLimitMiddleware.js';
 import {
   requireJwtAuth,
   requireScopes,
   requireWalletParamMatchesJwt,
-} from "../middleware/jwtAuth.js";
+} from '../middleware/jwtAuth.js';
 
 const router = Router();
 
@@ -53,12 +60,57 @@ const router = Router();
  *         description: userId does not match the authenticated wallet.
  */
 router.get(
-  "/:userId",
+  '/:userId',
   requireJwtAuth,
-  requireScopes("read:score"),
-  requireWalletParamMatchesJwt("userId"),
+  requireScopes('read:score'),
+  requireWalletParamMatchesJwt('userId'),
   validate(getScoreSchema),
   getScore,
+);
+
+/**
+ * @swagger
+ * /score/{walletAddress}/history:
+ *   get:
+ *     summary: Retrieve a user's on-chain credit score history
+ *     description: >
+ *       Queries the RemittanceNFT contract for the score history vector and
+ *       returns a chronologically sorted timeline. Cached for 60 seconds to
+ *       avoid spamming the Soroban RPC.
+ *     tags: [Score]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: walletAddress
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Must equal the JWT wallet (`publicKey`)
+ *     responses:
+ *       200:
+ *         description: Score history retrieved successfully.
+ *       401:
+ *         description: Missing or invalid Bearer token.
+ *       403:
+ *         description: walletAddress does not match the authenticated wallet.
+ */
+router.get(
+  '/:walletAddress/history',
+  requireJwtAuth,
+  requireScopes('read:score'),
+  requireWalletParamMatchesJwt('walletAddress'),
+  validate(getScoreHistorySchema),
+  getOnChainScoreHistory,
+);
+
+router.get(
+  '/:walletAddress/nft',
+  requireJwtAuth,
+  requireScopes('read:score'),
+  requireWalletParamMatchesJwt('walletAddress'),
+  validate(getRemittanceNftSchema),
+  getRemittanceNft,
 );
 
 /**
@@ -87,56 +139,17 @@ router.get(
  *         content:
  *           application/json:
  *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                 userId:
- *                   type: string
- *                 score:
- *                   type: integer
- *                 band:
- *                   type: string
- *                 breakdown:
- *                   type: object
- *                   properties:
- *                     totalLoans:
- *                       type: integer
- *                     repaidOnTime:
- *                       type: integer
- *                     repaidLate:
- *                       type: integer
- *                     defaulted:
- *                       type: integer
- *                     totalRepaid:
- *                       type: number
- *                     averageRepaymentTime:
- *                       type: string
- *                     longestStreak:
- *                       type: integer
- *                     currentStreak:
- *                       type: integer
- *                 history:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       date:
- *                         type: string
- *                         format: date
- *                       score:
- *                         type: integer
- *                       event:
- *                         type: string
+ *               $ref: '#/components/schemas/ScoreBreakdownResponse'
  *       401:
  *         description: Missing or invalid Bearer token.
  *       403:
  *         description: userId does not match the authenticated wallet.
  */
 router.get(
-  "/:userId/breakdown",
+  '/:userId/breakdown',
   requireJwtAuth,
-  requireWalletParamMatchesJwt("userId"),
+  requireScopes('read:score'),
+  requireWalletParamMatchesJwt('userId'),
   validate(getScoreSchema),
   getScoreBreakdown,
 );
@@ -148,8 +161,8 @@ router.get(
  *     summary: Update a user's credit score based on repayment history
  *     description: >
  *       Adjusts the user's credit score by +15 for on-time repayments or
- *       −30 for late payments. Requires the `x-api-key` header to be set
- *       to the value of the `INTERNAL_API_KEY` environment variable.
+ *       −30 for late payments. Requires an `admin:loans` scoped API key or a
+ *       legacy internal API key.
  *     tags: [Score]
  *     security:
  *       - ApiKeyAuth: []
@@ -178,7 +191,7 @@ router.get(
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/UserScore'
+ *               $ref: '#/components/schemas/ScoreUpdateResponse'
  *       400:
  *         description: Validation error.
  *         content:
@@ -193,9 +206,9 @@ router.get(
  *               $ref: '#/components/schemas/ErrorResponse'
  */
 router.post(
-  "/update",
-  requireApiKey,
-  strictRateLimiter,
+  '/update',
+  requireApiKey('admin:loans'),
+  scoreUpdateRateLimit,
   validate(updateScoreSchema),
   updateScore,
 );

@@ -6,372 +6,314 @@ Next.js web application for the RemitLend platform, providing user interfaces fo
 
 The frontend is a modern React application built with Next.js that enables:
 
-- Wallet connection (Freighter, Albedo, etc.)
-- Credit score visualization
+- Wallet connection via Freighter
+- Credit score visualisation
 - Remittance NFT minting
 - Loan request and management
 - Lending pool participation
 - Real-time transaction tracking
+- Notifications and activity streams
 
 ## Tech Stack
 
-- **Framework**: Next.js 16 (App Router)
-- **React**: 19.2.3
-- **Language**: TypeScript
-- **Styling**: Tailwind CSS 4
-- **Wallet Integration**: Stellar Wallet Kit (planned)
-- **State Management**: React hooks + Context API (planned)
+| Layer                  | Technology                                                              |
+| ---------------------- | ----------------------------------------------------------------------- |
+| Framework              | Next.js 16 (App Router)                                                 |
+| React                  | 19.2.3                                                                  |
+| Language               | TypeScript                                                              |
+| Styling                | Tailwind CSS 4 (`@import "tailwindcss"` in globals.css, no config file) |
+| State management       | Zustand 5                                                               |
+| Server state / caching | TanStack React Query 5                                                  |
+| Wallet integration     | `@stellar/freighter-api`                                                |
+| Blockchain SDK         | `@stellar/stellar-sdk`                                                  |
+| Internationalisation   | next-intl 4 (locales: `en`, `es`, `tl`)                                 |
+| Charts                 | Recharts                                                                |
+| Animation              | Framer Motion                                                           |
+| Notifications          | Sonner                                                                  |
+| Monitoring             | Sentry                                                                  |
+| PWA                    | Serwist                                                                 |
 
 ## Getting Started
 
 ### Prerequisites
 
 - Node.js 18 or higher
-- npm or yarn
-- Stellar wallet (Freighter recommended)
+- npm
+- Freighter browser extension (for wallet features)
 
 ### Installation
 
 ```bash
-# Install dependencies
 npm install
-
-# Start development server
 npm run dev
 ```
-
-### Access the Application
 
 Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ## Available Scripts
 
 ```bash
-# Development
 npm run dev          # Start dev server with hot reload
-
-# Production
-npm run build        # Build for production
-npm start            # Run production build
-
-# Code Quality
-npm run lint         # Check code quality with ESLint
+npm run build        # Production build
+npm start            # Serve production build
+npm run lint         # Check formatting with Prettier (not ESLint)
+npm run format       # Auto-format with Prettier
+npm run typecheck    # TypeScript type check (tsc --noEmit)
+npm test             # Jest unit tests
+npm run test:watch   # Jest in watch mode
+npm run test:e2e     # Playwright end-to-end tests
+npm run audit:a11y   # Run axe-playwright accessibility audit on key pages
 ```
+
+> **Note:** `npm run lint` runs `prettier --check` — it checks formatting, not ESLint rules.
+> ESLint runs automatically via `lint-staged` on pre-commit.
 
 ## Project Structure
 
 ```
 frontend/
+├── e2e/                        # Playwright end-to-end tests
+│   ├── borrower-loan-flow.spec.ts
+│   ├── criticalFlows.spec.ts
+│   └── ...
+├── messages/                   # next-intl translation files
+│   ├── en.json
+│   ├── es.json
+│   └── tl.json
 ├── src/
-│   └── app/                    # Next.js App Router
-│       ├── components/         # React components
-│       │   └── global_ui/     # Reusable UI components
-│       │       └── Spinner.tsx
-│       ├── layout.tsx         # Root layout
-│       ├── page.tsx           # Home page
-│       ├── not-found.tsx      # 404 page
-│       ├── globals.css        # Global styles
-│       └── favicon.ico
-├── public/                     # Static assets
-│   ├── og-image.png
-│   └── *.svg
-├── next.config.ts             # Next.js configuration
-├── tailwind.config.ts         # Tailwind CSS configuration
-├── tsconfig.json              # TypeScript configuration
-├── package.json
-└── README.md
-```
-
-## Features
-
-### Current Features
-
-- Landing page with project overview
-- Responsive design for mobile and desktop
-- Loading states with spinner component
-- SEO optimization with metadata
-- Custom 404 page
-
-### Planned Features
-
-#### Borrower Dashboard
-
-- [ ] Wallet connection interface
-- [ ] Credit score display
-- [ ] Remittance NFT minting
-- [ ] Loan request form
-- [ ] Active loans management
-- [ ] Repayment interface
-- [ ] Transaction history
-
-#### Lender Dashboard
-
-- [ ] Pool liquidity overview
-- [ ] Deposit/withdraw interface
-- [ ] Loan approval queue
-- [ ] Yield tracking
-- [ ] Portfolio analytics
-
-#### Shared Features
-
-- [ ] Real-time transaction status
-- [ ] Notification system
-- [ ] Multi-language support
-- [ ] Dark mode toggle
-- [ ] Wallet balance display
-
-## Component Library
-
-### Global UI Components
-
-#### Spinner
-
-Loading indicator component.
-
-```tsx
-import { Spinner } from "@/app/components/global_ui/Spinner";
-
-<Spinner size="md" />;
-```
-
-**Props:**
-
-- `size`: 'sm' | 'md' | 'lg' (default: 'md')
-
-### Planned Components
-
-- `Button` - Reusable button with variants
-- `Card` - Container component
-- `Modal` - Dialog component
-- `Input` - Form input with validation
-- `WalletConnect` - Wallet connection button
-- `TransactionStatus` - Transaction feedback
-- `LoanCard` - Loan information display
-- `PoolStats` - Pool statistics display
-
-## Styling
-
-### Tailwind CSS
-
-The project uses Tailwind CSS 4 for styling with a custom configuration.
-
-**Key Features:**
-
-- Utility-first CSS
-- Responsive design utilities
-- Custom color palette (planned)
-- Dark mode support (planned)
-
-**Example:**
-
-```tsx
-<div className="flex items-center justify-center min-h-screen bg-gray-50">
-  <h1 className="text-4xl font-bold text-gray-900">Welcome to RemitLend</h1>
-</div>
-```
-
-### Global Styles
-
-Global styles are defined in `src/app/globals.css`:
-
-- CSS reset
-- Tailwind directives
-- Custom CSS variables
-- Typography defaults
-
-## Wallet Integration
-
-### Stellar Wallet Kit (Planned)
-
-Integration with Stellar wallets for transaction signing.
-
-**Supported Wallets:**
-
-- Freighter
-- Albedo
-- Rabet
-- xBull
-
-**Example Usage:**
-
-```tsx
-import { StellarWalletKit } from "@stellar/wallet-kit";
-
-const kit = new StellarWalletKit({
-  network: "testnet",
-  selectedWallet: "freighter",
-});
-
-// Connect wallet
-await kit.connect();
-
-// Sign transaction
-const signedTx = await kit.sign(transaction);
-```
-
-## State Management
-
-### React Context (Planned)
-
-Global state management using React Context API.
-
-**Contexts:**
-
-- `WalletContext` - Wallet connection state
-- `UserContext` - User profile and credit score
-- `LoanContext` - Active loans data
-- `PoolContext` - Lending pool information
-
-**Example:**
-
-```tsx
-import { useWallet } from "@/contexts/WalletContext";
-
-function MyComponent() {
-  const { address, connected, connect, disconnect } = useWallet();
-
-  return (
-    <button onClick={connected ? disconnect : connect}>
-      {connected ? `Connected: ${address}` : "Connect Wallet"}
-    </button>
-  );
-}
-```
-
-## API Integration
-
-### Backend API
-
-The frontend communicates with the Express backend for off-chain data.
-
-**Base URL:** `http://localhost:3001/api`
-
-**Example:**
-
-```tsx
-async function fetchCreditScore(userId: string) {
-  const response = await fetch(`http://localhost:3001/api/score/${userId}`);
-  const data = await response.json();
-  return data.score;
-}
-```
-
-### Blockchain Integration
-
-Direct interaction with Soroban smart contracts via Stellar SDK.
-
-**Example:**
-
-```tsx
-import { Contract, SorobanRpc } from "@stellar/stellar-sdk";
-
-const contract = new Contract(contractId);
-const server = new SorobanRpc.Server("https://soroban-testnet.stellar.org");
-
-// Call contract method
-const result = await contract.call("get_score", [nftId]);
+│   └── app/
+│       ├── [locale]/           # Localised routes (en / es / tl)
+│       │   ├── layout.tsx
+│       │   ├── page.tsx        # Landing page
+│       │   ├── globals.css     # Tailwind 4 entry + CSS custom properties
+│       │   ├── loans/          # Borrower loan list + [loanId] detail
+│       │   ├── lend/           # Lender dashboard
+│       │   ├── wallet/         # Wallet connection & balance
+│       │   ├── remittances/    # Remittance NFT viewer
+│       │   ├── send-remittance/
+│       │   ├── request-loan/
+│       │   ├── repay/
+│       │   ├── notifications/
+│       │   ├── analytics/
+│       │   ├── activity/
+│       │   ├── settings/
+│       │   ├── liquidations/
+│       │   ├── kingdom/
+│       │   ├── admin/          # Admin governance
+│       │   └── ui-demo/        # Dev-only component gallery (404 in production)
+│       ├── components/
+│       │   ├── ui/             # Design-system primitives (22 components)
+│       │   ├── global_ui/      # App-shell components (Spinner, ErrorBoundary …)
+│       │   ├── borrower/
+│       │   ├── lender/
+│       │   └── remittance/
+│       ├── stores/             # Zustand stores
+│       │   ├── useWalletStore.ts
+│       │   ├── useUserStore.ts
+│       │   ├── useThemeStore.ts
+│       │   ├── useUIStore.ts
+│       │   ├── useToastStore.ts
+│       │   └── useGamificationStore.ts
+│       ├── hooks/              # Custom React hooks
+│       │   └── README_TOAST_SYSTEM.md  # Toast notification system architecture & usage
+│       ├── lib/                # API clients and utilities
+│       └── utils/              # Pure helpers (cn, stellar, amount, csv …)
+├── i18n.config.ts
+├── next.config.ts
+├── postcss.config.mjs
+├── playwright.config.ts
+├── jest.config.js
+├── tsconfig.json
+└── package.json
 ```
 
 ## Routing
 
-### App Router Structure
+All pages are nested under the `[locale]` segment, so every URL is prefixed with the active locale:
 
-Next.js 13+ App Router with file-based routing.
+| Route                       | Description                 |
+| --------------------------- | --------------------------- |
+| `/[locale]`                 | Landing page                |
+| `/[locale]/wallet`          | Wallet connection           |
+| `/[locale]/loans`           | Loan list                   |
+| `/[locale]/loans/[loanId]`  | Loan detail                 |
+| `/[locale]/lend`            | Lender dashboard            |
+| `/[locale]/request-loan`    | New loan request            |
+| `/[locale]/repay`           | Repayment flow              |
+| `/[locale]/remittances`     | Remittance NFT gallery      |
+| `/[locale]/send-remittance` | Send remittance             |
+| `/[locale]/notifications`   | Notification inbox          |
+| `/[locale]/activity`        | Activity log                |
+| `/[locale]/analytics`       | Analytics dashboard         |
+| `/[locale]/settings`        | User settings               |
+| `/[locale]/liquidations`    | Liquidation queue           |
+| `/[locale]/kingdom`         | Gamification / Kingdom view |
+| `/[locale]/admin`           | Governance admin            |
+| `/[locale]/ui-demo`         | Dev-only component gallery  |
+| `/[locale]/not-found`       | 404 page                    |
 
-**Current Routes:**
+## State Management
 
-- `/` - Landing page
-- `/404` - Not found page
+Global state is managed with **Zustand 5** stores:
 
-**Planned Routes:**
+| Store                  | Responsibility                                              |
+| ---------------------- | ----------------------------------------------------------- |
+| `useWalletStore`       | Freighter wallet connection, public key, signing            |
+| `useUserStore`         | User profile and credit score                               |
+| `useThemeStore`        | Light / dark / system theme with `localStorage` persistence |
+| `useUIStore`           | Modal and sidebar open/close state                          |
+| `useToastStore`        | Toast queue used by `useToast` hook                         |
+| `useGamificationStore` | Kingdom / XP state                                          |
 
-- `/borrower` - Borrower dashboard
-- `/lender` - Lender dashboard
-- `/loans` - Loan management
-- `/loans/[id]` - Loan details
-- `/pool` - Pool overview
-- `/profile` - User profile
+TanStack React Query handles server-state caching and background refetching for all API calls.
 
-## SEO & Metadata
+## Wallet Integration
 
-### Metadata Configuration
-
-```tsx
-export const metadata = {
-  title: "RemitLend - Credit from Remittances",
-  description: "Turn your remittance history into credit history",
-  openGraph: {
-    title: "RemitLend",
-    description: "Decentralized lending for migrant workers",
-    images: ["/og-image.png"],
-  },
-};
-```
-
-## Performance Optimization
-
-### Next.js Features
-
-- **Static Generation**: Pre-render pages at build time
-- **Image Optimization**: Automatic image optimization
-- **Code Splitting**: Automatic code splitting per route
-- **Font Optimization**: Automatic font optimization
-
-### Best Practices
-
-- Use `next/image` for images
-- Implement lazy loading for heavy components
-- Minimize client-side JavaScript
-- Use server components when possible
-- Implement proper caching strategies
-
-## Testing (Planned)
-
-### Testing Stack
-
-- **Unit Tests**: Jest + React Testing Library
-- **E2E Tests**: Playwright or Cypress
-- **Component Tests**: Storybook
-
-### Example Test
+Wallet integration uses **`@stellar/freighter-api`**:
 
 ```tsx
-import { render, screen } from "@testing-library/react";
-import { Spinner } from "@/app/components/global_ui/Spinner";
+import { isConnected, getPublicKey, signTransaction } from "@stellar/freighter-api";
 
-describe("Spinner", () => {
-  it("renders spinner", () => {
-    render(<Spinner />);
-    expect(screen.getByRole("status")).toBeInTheDocument();
-  });
-});
+const connected = await isConnected();
+const publicKey = await getPublicKey();
+const signedXdr = await signTransaction(xdr, { networkPassphrase });
 ```
+
+Wallet state (public key, connection status) is managed by `useWalletStore`.
+
+## Component Library
+
+Design-system primitives live in [`src/app/components/ui/`](src/app/components/ui/). There are 22 components:
+
+### Core primitives
+
+| Component                                                                              | Props                                                                                                                                     | Description                                           |
+| -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `Button`                                                                               | `variant` (`primary`\|`secondary`\|`outline`\|`ghost`\|`danger`), `size` (`sm`\|`md`\|`lg`\|`icon`), `isLoading`, `leftIcon`, `rightIcon` | Polymorphic button with loading spinner               |
+| `Input`                                                                                | `label`, `error`, `helperText`, `leftIcon`, `rightIcon`                                                                                   | Labelled text input with accessible error/helper text |
+| `Card` / `CardHeader` / `CardTitle` / `CardDescription` / `CardContent` / `CardFooter` | `className`                                                                                                                               | Compound card layout                                  |
+| `Modal`                                                                                | `isOpen`, `onClose`, `title`, `size` (`sm`\|`md`\|`lg`\|`xl`), `ariaLabel`                                                                | Focus-trapped animated dialog                         |
+
+### Feedback & status
+
+| Component                                                                                         | Props                                                                                   | Description                                             |
+| ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `Skeleton` / `SkeletonText` / `SkeletonCard` / `SkeletonRow` / `SkeletonChart` / `SkeletonAvatar` | `className`, `lines` (SkeletonText)                                                     | Loading placeholders                                    |
+| `EmptyState`                                                                                      | `icon`, `title`, `description`, `actionLabel`, `actionHref` \| `onAction`, `actionIcon` | Zero-state placeholder with optional CTA                |
+| `StatusIndicator`                                                                                 | `label`, `tone` (`success`\|`danger`\|`warning`\|`info`\|`neutral`), `icon`, `iconOnly` | Coloured badge pill                                     |
+| `LoanStatusBadge`                                                                                 | `status` (`active`\|`pending`\|`repaid`\|`defaulted`\|`liquidated`)                     | Domain-specific status badge                            |
+| `Toast` / `Toaster`                                                                               | —                                                                                       | Toast notification components backed by `useToastStore` |
+
+### Controls & utilities
+
+| Component                  | Props                                                                                                    | Description                                      |
+| -------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `Tooltip`                  | `content`, `label`, `iconClassName`                                                                      | Hover/focus tooltip with info icon               |
+| `PaginationControls`       | `currentPage`, `totalPages`, `hasPrevious`, `hasNext`, `onPageChange`, `onPrevious`, `onNext`, `summary` | Page navigation with ellipsis windowing          |
+| `CopyButton`               | `value`                                                                                                  | Clipboard copy with check feedback               |
+| `TxHashLink`               | `txHash`, `chars`                                                                                        | Truncated hash with copy + Stellar Explorer link |
+| `ThemeToggle`              | —                                                                                                        | Light / dark / system switcher                   |
+| `ConfirmTransactionDialog` | —                                                                                                        | Pre-submit transaction confirmation modal        |
+| `OperationProgress`        | —                                                                                                        | Multi-step operation stepper                     |
+| `RepaymentProgress`        | —                                                                                                        | Loan repayment progress bar                      |
+| `LoanTimeline`             | —                                                                                                        | Chronological loan event list                    |
+| `TransactionStatusTracker` | —                                                                                                        | Live transaction polling status                  |
+| `CreditScoreGauge`         | —                                                                                                        | Circular credit score visualisation              |
+| `CreditScoreBreakdown`     | —                                                                                                        | Score factor breakdown chart                     |
+
+> A live, interactive gallery is available in development at `/[locale]/ui-demo` (returns 404 in production).
+
+## Styling
+
+Tailwind CSS 4 is configured via CSS-first `@import "tailwindcss"` in
+[`src/app/[locale]/globals.css`](src/app/%5Blocale%5D/globals.css) — there is no
+`tailwind.config.ts` file. Design tokens are declared as CSS custom properties in `:root`:
+
+```css
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+  --focus-ring: #2563eb;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+```
+
+Dark mode is driven by the `.dark` class (set by `useThemeStore`) and also respects
+`prefers-color-scheme`.
+
+## Testing
+
+### Unit tests — Jest + React Testing Library
+
+```bash
+npm test            # run once
+npm run test:watch  # interactive watch mode
+```
+
+Test files sit alongside source files (`*.test.ts` / `*.test.tsx`). Key test suites:
+
+- `src/app/stores/stores.test.ts` — Zustand store logic
+- `src/app/utils/*.test.ts` — pure utility functions
+- `src/app/components/**/*.test.tsx` — component rendering
+
+### End-to-end tests — Playwright
+
+```bash
+npm run test:e2e
+```
+
+Specs live in `e2e/` and cover critical user flows:
+
+- `borrower-loan-flow.spec.ts`
+- `borrower-repay-flow.spec.ts`
+- `lender-withdraw-flow.spec.ts`
+- `notifications-inbox.spec.ts`
+- `remittance-nft-viewer.spec.ts`
+- `admin-governance.spec.ts`
+- `criticalFlows.spec.ts`
+
+### Accessibility audit
+
+```bash
+npm run audit:a11y   # runs axe-playwright accessibility checks via Playwright
+```
+
+## API Integration
+
+The frontend talks to the Express backend for off-chain data and uses `@stellar/stellar-sdk`
+directly for on-chain calls.
+
+**Backend base URL:** `NEXT_PUBLIC_API_URL` (default: `http://localhost:3001`)
+
+## Architecture & System Documentation
+
+- [Toast & Notification System Guide](src/app/hooks/README_TOAST_SYSTEM.md) — Detailed architecture and usage for `useContractToast`, `useContractMutation`, and Sonner transaction feedback.
 
 ## Deployment
 
-### Vercel (Recommended)
+### Vercel (recommended)
 
 ```bash
-# Install Vercel CLI
 npm i -g vercel
-
-# Deploy
 vercel
 ```
 
 ### Docker
 
 ```bash
-# Build image
 docker build -t remitlend-frontend .
-
-# Run container
 docker run -p 3000:3000 remitlend-frontend
 ```
 
 ### Environment Variables
-
-Create `.env.local` for local development:
 
 ```env
 NEXT_PUBLIC_API_URL=http://localhost:3001
@@ -379,87 +321,44 @@ NEXT_PUBLIC_STELLAR_NETWORK=testnet
 NEXT_PUBLIC_STELLAR_RPC_URL=https://soroban-testnet.stellar.org
 ```
 
-## Accessibility
+## Service Worker Update Strategy
 
-### WCAG Compliance
+This application uses [Serwist](https://serwist-docs.vercel.app/) (PWA) to pre-cache assets and serve them offline. The service worker configuration lives in `src/app/sw.ts`.
 
-The application aims for WCAG 2.1 Level AA compliance:
+### How updates reach users after a deployment
 
-- Semantic HTML elements
-- ARIA labels where needed
-- Keyboard navigation support
-- Color contrast ratios
-- Screen reader compatibility
+1. **New precache manifest** — Every production build generates a fresh `__SW_MANIFEST` with content-hashed URLs. When the browser fetches the updated HTML, it discovers the new manifest and detects that the cached assets no longer match.
+2. **Immediate activation** — `skipWaiting: true` and `clientsClaim: true` ensure the new service worker activates and takes over all open tabs without requiring the user to close the browser.
+3. **Next navigation is fresh** — After the new SW activates, the next page navigation or fetch request goes through the updated precache, so users receive the latest code.
+4. **Runtime cache bypass** — API (`/api/`), SSE (`/sse/`), and Next.js internal (`/_next/`) requests are always fetched from the network (`bypassCdn`) to prevent stale data.
 
-**Note:** Full WCAG compliance requires manual testing with assistive technologies.
+### Known limitation
 
-## Browser Support
-
-- Chrome (latest 2 versions)
-- Firefox (latest 2 versions)
-- Safari (latest 2 versions)
-- Edge (latest 2 versions)
-
-## Contributing
-
-See [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines.
-
-### Code Style
-
-- Use functional components with hooks
-- Prefer TypeScript interfaces over types
-- Use descriptive component names
-- Keep components small and focused
-- Extract reusable logic into custom hooks
-- Follow Next.js best practices
-
-### Before Submitting PR
-
-```bash
-npm run lint
-npm run build
-```
+There is currently **no user-facing "update available" prompt**. Users only receive new code when they refresh the page or navigate to a new route. Tabs that have been open for a long time will continue serving the old cached version until the user refreshes. See `docs/FOLLOWUP-sw-update-prompt.md` for tracking this gap.
 
 ## Troubleshooting
 
-### Port Already in Use
-
 ```bash
-# Kill process on port 3000
+# Port in use
 lsof -ti:3000 | xargs kill -9
-```
 
-### Build Errors
+# Stale Next.js cache
+rm -rf .next/ && npm run build
 
-```bash
-# Clean Next.js cache
-rm -rf .next/
-npm run build
-```
-
-### Module Not Found
-
-```bash
 # Reinstall dependencies
-rm -rf node_modules package-lock.json
-npm install
+rm -rf node_modules package-lock.json && npm install
 ```
 
 ## Resources
 
+- [Toast System Documentation](src/app/hooks/README_TOAST_SYSTEM.md)
 - [Next.js Documentation](https://nextjs.org/docs)
-- [React Documentation](https://react.dev)
-- [Tailwind CSS Documentation](https://tailwindcss.com/docs)
+- [Tailwind CSS v4 Documentation](https://tailwindcss.com/docs)
+- [Zustand Documentation](https://zustand.docs.pmnd.rs)
+- [TanStack React Query](https://tanstack.com/query/latest)
 - [Stellar Documentation](https://developers.stellar.org)
-- [Soroban Documentation](https://soroban.stellar.org/docs)
+- [next-intl Documentation](https://next-intl-docs.vercel.app)
 
 ## License
 
-ISC License - See LICENSE file for details.
-
-## Support
-
-- Open an issue for bug reports
-- Check existing issues before creating new ones
-- Provide browser and OS information
-- Include screenshots for UI issues
+ISC License — see LICENSE file for details.

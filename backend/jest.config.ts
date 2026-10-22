@@ -1,18 +1,33 @@
-/** @type {import('ts-jest').JestConfigWithTsJest} **/
-export default {
-  preset: "ts-jest/presets/default-esm",
-  testEnvironment: "node",
-  extensionsToTreatAsEsm: [".ts"],
+import type { Config } from 'jest';
+
+const config: Config = {
+  preset: 'ts-jest',
+  testEnvironment: 'node',
+  testMatch: ['**/*.test.ts', '**/*.spec.ts'],
+  setupFilesAfterEnv: ['<rootDir>/src/tests/jest.setup.js'],
+  moduleFileExtensions: ['ts', 'js', 'json', 'node'],
   transform: {
-    "^.+\\.tsx?$": [
-      "ts-jest",
+    '^.+\\.(ts|tsx)$': [
+      'ts-jest',
       {
         useESM: true,
+        tsconfig: {
+          module: 'esnext',
+          moduleResolution: 'bundler',
+        },
       },
     ],
   },
-  moduleNameMapper: {
-    "^(\\.{1,2}/.*)\\.js$": "$1",
+  extensionsToTreatAsEsm: ['.ts'],
+  globals: {
+    'ts-jest': {
+      useESM: true,
+    },
   },
-  testMatch: ["**/*.test.ts", "**/*.spec.ts"],
+  moduleNameMapper: {
+    // Correct pattern - strips .js so Jest finds the .ts source file
+    '^(./|../)(.*)\\.js$': '$1$2',
+  },
 };
+
+export default config;

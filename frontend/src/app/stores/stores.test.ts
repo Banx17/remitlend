@@ -1,13 +1,16 @@
 /**
  * stores/stores.test.ts
  *
- * Unit tests for all three Zustand stores.
+ * Unit tests for all Zustand stores.
  * Tests run against the store's actions and derived state.
  */
 
 import { useUserStore } from "./useUserStore";
 import { useWalletStore } from "./useWalletStore";
 import { useUIStore } from "./useUIStore";
+import { THEME_STORAGE_KEY } from "../lib/theme";
+import { useThemeStore } from "./useThemeStore";
+import { getNextLevelInfo, LEVEL_THRESHOLDS, useGamificationStore } from "./useGamificationStore";
 import type { ModalId } from "./useUIStore";
 
 // Reset store state between tests
@@ -20,6 +23,7 @@ beforeEach(() => {
     balances: [],
     isLoadingBalances: false,
     error: null,
+    shouldAutoReconnect: false,
   });
   useUIStore.setState((state) => ({
     ...state,
@@ -27,6 +31,14 @@ beforeEach(() => {
     isGlobalLoading: false,
     globalLoadingMessage: null,
   }));
+  useThemeStore.setState({
+    theme: "light",
+    hydrated: false,
+  });
+  window.localStorage.clear();
+  document.documentElement.classList.remove("dark");
+  delete document.documentElement.dataset.theme;
+  useGamificationStore.getState().resetGamification();
 });
 
 // ─── useUserStore ────────────────────────────────────────────────────────────
@@ -85,7 +97,7 @@ describe("useUserStore", () => {
 // ─── useWalletStore ──────────────────────────────────────────────────────────
 
 describe("useWalletStore", () => {
-  const mockNetwork = { chainId: 1, name: "Ethereum", isSupported: true };
+  const mockNetwork = { chainId: 2, name: "TESTNET", isSupported: true };
 
   it("starts disconnected", () => {
     const { status, address } = useWalletStore.getState();
@@ -99,7 +111,8 @@ describe("useWalletStore", () => {
     const { status, address, network } = useWalletStore.getState();
     expect(status).toBe("connected");
     expect(address).toBe("0x123");
-    expect(network?.chainId).toBe(1);
+    expect(network?.chainId).toBe(2);
+    expect(useWalletStore.getState().shouldAutoReconnect).toBe(true);
   });
 
   it("disconnect resets to initial state", () => {
@@ -110,6 +123,7 @@ describe("useWalletStore", () => {
     expect(status).toBe("disconnected");
     expect(address).toBeNull();
     expect(balances).toHaveLength(0);
+    expect(useWalletStore.getState().shouldAutoReconnect).toBe(false);
   });
 
   it("setBalances stores balances and clears loading flag", () => {
@@ -199,5 +213,256 @@ describe("useUIStore", () => {
     useUIStore.getState().hideGlobalLoading();
     expect(useUIStore.getState().isGlobalLoading).toBe(false);
     expect(useUIStore.getState().globalLoadingMessage).toBeNull();
+  });
+});
+
+// ─── useThemeStore ───────────────────────────────────────────────────────────
+
+describe("useThemeStore", () => {
+  it("uses the system preference on first visit when nothing is stored", () => {
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: jest.fn().mockImplementation(() => ({
+        matches: true,
+        media: "(prefers-color-scheme: dark)",
+        onchange: null,
+        addEventListener: jest.fn(),
+        removeEventListener: jest.fn(),
+        addListener: jest.fn(),
+        removeListener: jest.fn(),
+        dispatchEvent: jest.fn(),
+      })),
+    });
+
+    useThemeStore.getState().initializeTheme();
+
+    const { theme, hydrated } = useThemeStore.getState();
+    expect(theme).toBe("dark");
+    expect(hydrated).toBe(true);
+    expect(document.documentElement.classList.contains("dark")).toBe(true);
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
+  });
+
+  it("persists an explicit theme selection and applies it to the document", () => {
+    useThemeStore.getState().setTheme("dark");
+
+    const { theme, hydrated } = useThemeStore.getState();
+    expect(theme).toBe("dark");
+    expect(hydrated).toBe(true);
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("dark");
+    expect(document.documentElement.classList.contains("dark")).toBe(true);
+  });
+
+  it("cycles through light → dark → system → light when toggled", () => {
+    useThemeStore.setState({ theme: "system", hydrated: true });
+
+    useThemeStore.getState().toggleTheme();
+
+    const { theme } = useThemeStore.getState();
+    expect(theme).toBe("light");
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("light");
+    expect(document.documentElement.classList.contains("dark")).toBe(false);
+  });
+});
+
+// ─── useGamificationStore ────────────────────────────────────────────────────
+
+describe("useGamificationStore", () => {
+  describe("addXP / checkLevelUp", () => {
+    it.each(
+      LEVEL_THRESHOLDS.slice(1).map((threshold) => {
+        const previousThreshold = LEVEL_THRESHOLDS[threshold.level - 2];
+        return {
+          fromXp: threshold.xpRequired - 1,
+          addAmount: 1,
+          expectedLevel: threshold.level,
+          expectedTitle: threshold.title,
+          expectedReward: threshold,
+        };
+      }),
+    )(
+      "crossing level $expectedLevel threshold ($expectedTitle) updates level-up state",
+      ({ fromXp, addAmount, expectedLevel, expectedTitle, expectedReward }) => {
+        const previousLevel = expectedLevel - 1;
+        const previousTitle = LEVEL_THRESHOLDS[previousLevel - 1].title;
+
+        useGamificationStore.setState({
+          xp: fromXp,
+          level: previousLevel,
+          kingdomTitle: previousTitle,
+          showLevelUpModal: false,
+          pendingLevelUp: null,
+        });
+
+        useGamificationStore.getState().addXP(addAmount);
+
+        const state = useGamificationStore.getState();
+        expect(state.xp).toBe(fromXp + addAmount);
+        expect(state.level).toBe(expectedLevel);
+        expect(state.kingdomTitle).toBe(expectedTitle);
+        expect(state.showLevelUpModal).toBe(true);
+        expect(state.pendingLevelUp).toEqual(expectedReward);
+      },
+    );
+
+    it("does not trigger level-up when XP stays within the current level", () => {
+      useGamificationStore.setState({
+        xp: 50,
+        level: 1,
+        kingdomTitle: "Peasant",
+        showLevelUpModal: false,
+        pendingLevelUp: null,
+      });
+
+      useGamificationStore.getState().addXP(10);
+
+      const state = useGamificationStore.getState();
+      expect(state.xp).toBe(60);
+      expect(state.level).toBe(1);
+      expect(state.kingdomTitle).toBe("Peasant");
+      expect(state.showLevelUpModal).toBe(false);
+      expect(state.pendingLevelUp).toBeNull();
+    });
+
+    it("dismissLevelUp clears the modal and pending reward", () => {
+      useGamificationStore.getState().addXP(100);
+      useGamificationStore.getState().dismissLevelUp();
+
+      const state = useGamificationStore.getState();
+      expect(state.showLevelUpModal).toBe(false);
+      expect(state.pendingLevelUp).toBeNull();
+      expect(state.level).toBe(2);
+    });
+  });
+
+  describe("getNextLevelInfo / calculateLevel", () => {
+    it.each([
+      { xp: 0, currentLevel: 1, nextLevel: 2, xpToNext: 100, progress: 0 },
+      { xp: 50, currentLevel: 1, nextLevel: 2, xpToNext: 50, progress: 50 },
+      { xp: 99, currentLevel: 1, nextLevel: 2, xpToNext: 1, progress: 99 },
+      { xp: 100, currentLevel: 2, nextLevel: 3, xpToNext: 200, progress: 0 },
+      { xp: 299, currentLevel: 2, nextLevel: 3, xpToNext: 1, progress: 99.5 },
+      { xp: 600, currentLevel: 4, nextLevel: 5, xpToNext: 400, progress: 0 },
+      { xp: 2499, currentLevel: 6, nextLevel: 7, xpToNext: 1, progress: 99.9 },
+      { xp: 2500, currentLevel: 7, nextLevel: 7, xpToNext: 0, progress: 100 },
+      { xp: 5000, currentLevel: 7, nextLevel: 7, xpToNext: 0, progress: 100 },
+    ])("at $xp XP returns correct level progression info", ({ xp, ...expected }) => {
+      expect(getNextLevelInfo(xp)).toEqual(expected);
+    });
+
+    it("clamps progress to 0 when XP is below the current level floor", () => {
+      expect(getNextLevelInfo(-10)).toEqual({
+        currentLevel: 1,
+        nextLevel: 2,
+        xpToNext: 110,
+        progress: 0,
+      });
+    });
+  });
+
+  describe("unlockAchievement", () => {
+    it("sets unlockedAt and maxes progress for the target achievement", () => {
+      useGamificationStore.getState().unlockAchievement("first_loan");
+
+      const achievement = useGamificationStore
+        .getState()
+        .achievements.find((a) => a.id === "first_loan");
+
+      expect(achievement?.unlockedAt).toBeDefined();
+      expect(achievement?.progress).toBe(achievement?.maxProgress);
+    });
+  });
+
+  describe("updateAchievementProgress", () => {
+    it("sets unlockedAt exactly once when progress reaches maxProgress", () => {
+      const { updateAchievementProgress } = useGamificationStore.getState();
+
+      updateAchievementProgress("first_loan", 0);
+      let achievement = useGamificationStore
+        .getState()
+        .achievements.find((a) => a.id === "first_loan");
+      expect(achievement?.unlockedAt).toBeUndefined();
+
+      updateAchievementProgress("first_loan", 1);
+      achievement = useGamificationStore.getState().achievements.find((a) => a.id === "first_loan");
+      const firstUnlock = achievement?.unlockedAt;
+      expect(firstUnlock).toBeDefined();
+
+      updateAchievementProgress("first_loan", 1);
+      achievement = useGamificationStore.getState().achievements.find((a) => a.id === "first_loan");
+      expect(achievement?.unlockedAt).toBe(firstUnlock);
+    });
+
+    it("clamps progress to maxProgress", () => {
+      useGamificationStore.getState().updateAchievementProgress("five_loans", 10);
+
+      const achievement = useGamificationStore
+        .getState()
+        .achievements.find((a) => a.id === "five_loans");
+
+      expect(achievement?.progress).toBe(5);
+      expect(achievement?.unlockedAt).toBeDefined();
+    });
+  });
+
+  describe("persistence", () => {
+    it("persists only durable fields, excluding transient UI state", () => {
+      // Trigger a level-up: this sets showLevelUpModal, pendingLevelUp, and
+      // recentXPGain in memory, all of which must NOT be written to storage.
+      useGamificationStore.getState().addXP(100);
+
+      const stored = JSON.parse(window.localStorage.getItem("remitlend-gamification") || "{}");
+      const persisted = stored.state || {};
+
+      // Durable progression and settings survive.
+      expect(persisted.level).toBe(2);
+      expect(persisted.xp).toBe(100);
+      expect(persisted.kingdomTitle).toBe("Merchant");
+      expect(persisted.achievements).toBeDefined();
+      expect(persisted.soundEnabled).toBe(true);
+      expect(persisted.animationsEnabled).toBe(true);
+      expect(persisted.soundVolume).toBe(0.5);
+
+      // Transient UI flags are excluded.
+      expect(persisted.showLevelUpModal).toBeUndefined();
+      expect(persisted.pendingLevelUp).toBeUndefined();
+      expect(persisted.recentXPGain).toBeUndefined();
+    });
+
+    it("rehydrates durable progression without transient UI flags", async () => {
+      // Simulate a persisted payload written by the new partialize shape:
+      // durable fields only, no transient UI flags.
+      window.localStorage.setItem(
+        "remitlend-gamification",
+        JSON.stringify({
+          state: {
+            level: 3,
+            xp: 300,
+            kingdomTitle: "Knight",
+            achievements: [],
+            soundEnabled: false,
+            animationsEnabled: true,
+            soundVolume: 0.2,
+          },
+          version: 0,
+        }),
+      );
+
+      await useGamificationStore.persist.rehydrate();
+
+      const state = useGamificationStore.getState();
+      // Existing progression still hydrates.
+      expect(state.level).toBe(3);
+      expect(state.xp).toBe(300);
+      expect(state.kingdomTitle).toBe("Knight");
+      expect(state.soundEnabled).toBe(false);
+      expect(state.animationsEnabled).toBe(true);
+      expect(state.soundVolume).toBe(0.2);
+      // Transient UI flags stay at their defaults.
+      expect(state.showLevelUpModal).toBe(false);
+      expect(state.pendingLevelUp).toBeNull();
+      expect(state.recentXPGain).toBeNull();
+    });
   });
 });

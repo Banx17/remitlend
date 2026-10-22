@@ -8,53 +8,56 @@ export const shorthands = undefined;
  * @returns {Promise<void> | void}
  */
 export const up = (pgm) => {
-  pgm.createTable("webhook_subscriptions", {
-    id: "id",
-    callback_url: { type: "text", notNull: true },
-    event_types: { type: "jsonb", notNull: true, default: "[]::jsonb" },
-    secret: { type: "varchar(255)" },
-    is_active: { type: "boolean", notNull: true, default: true },
+  pgm.createTable('webhook_subscriptions', {
+    id: 'id',
+    callback_url: { type: 'text', notNull: true },
+    event_types: { type: 'jsonb', notNull: true, default: pgm.func("'[]'::jsonb") },
+    secret: { type: 'varchar(255)' },
+    is_active: { type: 'boolean', notNull: true, default: true },
     created_at: {
-      type: "timestamp",
+      type: 'timestamp',
       notNull: true,
-      default: pgm.func("current_timestamp"),
+      default: pgm.func('current_timestamp'),
     },
     updated_at: {
-      type: "timestamp",
+      type: 'timestamp',
       notNull: true,
-      default: pgm.func("current_timestamp"),
+      default: pgm.func('current_timestamp'),
     },
   });
 
-  pgm.createTable("webhook_deliveries", {
-    id: "id",
+  pgm.createTable('webhook_deliveries', {
+    id: 'id',
     subscription_id: {
-      type: "integer",
+      type: 'integer',
       notNull: true,
-      references: "webhook_subscriptions",
-      onDelete: "CASCADE",
+      references: 'webhook_subscriptions',
+      onDelete: 'CASCADE',
     },
-    event_id: { type: "varchar(255)", notNull: true },
-    event_type: { type: "varchar(50)", notNull: true },
-    attempt_count: { type: "integer", notNull: true, default: 0 },
-    last_status_code: { type: "integer" },
-    last_error: { type: "text" },
-    delivered_at: { type: "timestamp" },
+    event_id: { type: 'varchar(255)', notNull: true },
+    event_type: { type: 'varchar(50)', notNull: true },
+    payload: { type: 'jsonb', notNull: true },
+    attempt_count: { type: 'integer', notNull: true, default: 0 },
+    last_status_code: { type: 'integer' },
+    last_error: { type: 'text' },
+    delivered_at: { type: 'timestamp' },
+    next_retry_at: { type: 'timestamp' },
     created_at: {
-      type: "timestamp",
+      type: 'timestamp',
       notNull: true,
-      default: pgm.func("current_timestamp"),
+      default: pgm.func('current_timestamp'),
     },
     updated_at: {
-      type: "timestamp",
+      type: 'timestamp',
       notNull: true,
-      default: pgm.func("current_timestamp"),
+      default: pgm.func('current_timestamp'),
     },
   });
 
-  pgm.createIndex("webhook_subscriptions", "is_active");
-  pgm.createIndex("webhook_deliveries", "event_id");
-  pgm.createIndex("webhook_deliveries", "subscription_id");
+  pgm.createIndex('webhook_subscriptions', 'is_active');
+  pgm.createIndex('webhook_deliveries', 'event_id');
+  pgm.createIndex('webhook_deliveries', 'subscription_id');
+  pgm.createIndex('webhook_deliveries', ['next_retry_at', 'delivered_at']);
 };
 
 /**
@@ -62,6 +65,6 @@ export const up = (pgm) => {
  * @returns {Promise<void> | void}
  */
 export const down = (pgm) => {
-  pgm.dropTable("webhook_deliveries");
-  pgm.dropTable("webhook_subscriptions");
+  pgm.dropTable('webhook_deliveries');
+  pgm.dropTable('webhook_subscriptions');
 };

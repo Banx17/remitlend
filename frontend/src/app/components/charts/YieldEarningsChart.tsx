@@ -33,38 +33,6 @@ export function YieldEarningsChart({ data, className }: YieldEarningsChartProps)
       ? (data.reduce((sum, point) => sum + point.apy, 0) / data.length).toFixed(2)
       : "0.00";
 
-  // Custom tooltip
-  const CustomTooltip = ({ active, payload }: any) => {
-    if (active && payload && payload.length) {
-      const data = payload[0].payload;
-      return (
-        <div className="rounded-lg border border-gray-200 bg-white p-3 shadow-lg dark:border-zinc-800 dark:bg-zinc-950">
-          <p className="text-sm font-medium text-gray-900 dark:text-zinc-100">{data.date}</p>
-          <div className="mt-2 space-y-1">
-            <p className="text-sm text-gray-600 dark:text-zinc-400">
-              Earnings:{" "}
-              <span className="font-bold text-green-600 dark:text-green-400">
-                ${data.earnings.toFixed(2)}
-              </span>
-            </p>
-            <p className="text-sm text-gray-600 dark:text-zinc-400">
-              APY:{" "}
-              <span className="font-bold text-blue-600 dark:text-blue-400">
-                {data.apy.toFixed(2)}%
-              </span>
-            </p>
-            {data.principal && (
-              <p className="text-xs text-gray-500 dark:text-zinc-500 mt-1">
-                Principal: ${data.principal.toFixed(2)}
-              </p>
-            )}
-          </div>
-        </div>
-      );
-    }
-    return null;
-  };
-
   // Format currency
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat("en-US", {
@@ -136,7 +104,40 @@ export function YieldEarningsChart({ data, className }: YieldEarningsChartProps)
                 className: "text-xs text-gray-600 dark:text-zinc-400",
               }}
             />
-            <Tooltip content={<CustomTooltip />} />
+            <Tooltip
+              content={({ active, payload }: any) => {
+                if (active && payload && payload.length) {
+                  const item = (payload[0] as unknown as { payload: YieldDataPoint }).payload;
+                  return (
+                    <div className="rounded-lg border border-gray-200 bg-white p-3 shadow-lg dark:border-zinc-800 dark:bg-zinc-950">
+                      <p className="text-sm font-medium text-gray-900 dark:text-zinc-100">
+                        {item.date}
+                      </p>
+                      <div className="mt-2 space-y-1">
+                        <p className="text-sm text-gray-600 dark:text-zinc-400">
+                          Earnings:{" "}
+                          <span className="font-bold text-green-600 dark:text-green-400">
+                            ${item.earnings.toFixed(2)}
+                          </span>
+                        </p>
+                        <p className="text-sm text-gray-600 dark:text-zinc-400">
+                          APY:{" "}
+                          <span className="font-bold text-blue-600 dark:text-blue-400">
+                            {item.apy.toFixed(2)}%
+                          </span>
+                        </p>
+                        {item.principal && (
+                          <p className="text-xs text-gray-500 dark:text-zinc-500 mt-1">
+                            Principal: ${item.principal.toFixed(2)}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                }
+                return null;
+              }}
+            />
             <Legend
               wrapperStyle={{
                 paddingTop: "20px",

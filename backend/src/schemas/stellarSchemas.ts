@@ -1,5 +1,5 @@
-import { z } from "zod";
-import { StrKey } from "@stellar/stellar-sdk";
+import { z } from 'zod';
+import { StrKey } from '@stellar/stellar-sdk';
 
 /**
  * Zod schema for a Stellar Ed25519 public key (G... address).
@@ -8,11 +8,8 @@ import { StrKey } from "@stellar/stellar-sdk";
  */
 export const stellarAddressSchema = z
   .string()
-  .min(1, "Stellar address is required")
-  .refine(
-    (val) => StrKey.isValidEd25519PublicKey(val),
-    "Invalid Stellar address format",
-  );
+  .min(1, 'Stellar address is required')
+  .refine((val) => StrKey.isValidEd25519PublicKey(val), 'Invalid Stellar address format');
 
 /** Param schema for routes with a :borrower path parameter. */
 export const borrowerParamSchema = z.object({

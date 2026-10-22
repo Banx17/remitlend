@@ -5,6 +5,7 @@ import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import type { BorrowerLoan } from "../../hooks/useApi";
 import { formatCurrency, formatDate, getDaysUntilDeadline } from "./loanFormatters";
+import { LoanStatusBadge } from "../ui/LoanStatusBadge";
 
 export interface LoanCardProps {
   loan: BorrowerLoan;
@@ -22,47 +23,70 @@ export function LoanCard({ loan, variant = "compact" }: LoanCardProps) {
   const daysUntil = getDaysUntilDeadline(loan.nextPaymentDeadline);
   const isOverdue = daysUntil < 0;
   const isUrgent = daysUntil >= 0 && daysUntil <= 7;
+  const isLiquidated = loan.status === "liquidated";
+  const isDefaulted = loan.status === "defaulted";
+  const isTerminalDistressed = isDefaulted || isLiquidated;
 
   // ── Badge ──────────────────────────────────────────────────────────────────
   const badge =
     variant === "detailed"
       ? {
-          label: isOverdue ? "Overdue" : isUrgent ? "Due Soon" : "On Track",
-          className: isOverdue
-            ? "bg-red-100 text-red-800"
-            : isUrgent
-              ? "bg-yellow-100 text-yellow-800"
-              : "bg-green-100 text-green-800",
-        }
-      : {
-          label: loan.status.charAt(0).toUpperCase() + loan.status.slice(1),
-          className:
-            loan.status === "active"
-              ? "bg-green-100 text-green-800"
-              : loan.status === "pending"
+          label: isLiquidated
+            ? "Liquidated"
+            : isDefaulted
+              ? "Defaulted"
+              : isOverdue
+                ? "Overdue"
+                : isUrgent
+                  ? "Due Soon"
+                  : "On Track",
+          className: isTerminalDistressed
+            ? "bg-red-900 text-white"
+            : isOverdue
+              ? "bg-red-100 text-red-800"
+              : isUrgent
                 ? "bg-yellow-100 text-yellow-800"
-                : "bg-gray-100 text-gray-800",
-        };
+                : "bg-green-100 text-green-800",
+        }
+      : null;
 
   // ── Deadline colours ───────────────────────────────────────────────────────
-  const deadlineBg = isOverdue ? "bg-red-50" : isUrgent ? "bg-yellow-50" : "bg-gray-50";
-  const deadlineTextColor = isOverdue
-    ? "text-red-600"
-    : isUrgent
-      ? "text-yellow-600"
-      : "text-gray-900";
-  const deadlineSubColor = isOverdue
-    ? "text-red-600"
-    : isUrgent
-      ? "text-yellow-600"
-      : "text-gray-600";
-  const deadlineLabel = isOverdue
-    ? `${Math.abs(daysUntil)} days overdue`
-    : `${daysUntil} days remaining`;
+  const deadlineBg = isTerminalDistressed
+    ? "bg-red-900/20"
+    : isOverdue
+      ? "bg-red-50"
+      : isUrgent
+        ? "bg-yellow-50"
+        : "bg-gray-50";
+  const deadlineTextColor = isTerminalDistressed
+    ? "text-red-900"
+    : isOverdue
+      ? "text-red-600"
+      : isUrgent
+        ? "text-yellow-600"
+        : "text-gray-900";
+  const deadlineSubColor = isTerminalDistressed
+    ? "text-red-700"
+    : isOverdue
+      ? "text-red-600"
+      : isUrgent
+        ? "text-yellow-600"
+        : "text-gray-600";
+  const deadlineLabel = isLiquidated
+    ? "Collateral was liquidated"
+    : isDefaulted
+      ? "Contact support to recover"
+      : isOverdue
+        ? `${Math.abs(daysUntil)} days overdue`
+        : `${daysUntil} days remaining`;
 
   // ── Progress (detailed only) ───────────────────────────────────────────────
-  const totalForProgress = loan.principal + loan.accruedInterest;
-  const progress = totalForProgress > 0 ? (loan.totalRepaid / totalForProgress) * 100 : 0;
+  const totalForProgress =
+    loan.principal + loan.accruedInterest + (loan.accruedLateFee ?? 0);
+  const progress =
+    totalForProgress > 0
+      ? Math.min(100, Math.max(0, (loan.totalRepaid / totalForProgress) * 100))
+      : 0;
 
   return (
     <Card className="p-6 hover:shadow-lg transition-shadow">
@@ -70,9 +94,13 @@ export function LoanCard({ loan, variant = "compact" }: LoanCardProps) {
       <div className="flex justify-between items-start mb-4">
         <div>
           <h3 className="text-lg font-semibold">Loan #{loan.id}</h3>
-          <span className={`inline-block px-2 py-1 text-xs rounded-full mt-1 ${badge.className}`}>
-            {badge.label}
-          </span>
+          {badge ? (
+            <span className={`inline-block px-2 py-1 text-xs rounded-full mt-1 ${badge.className}`}>
+              {badge.label}
+            </span>
+          ) : (
+            <LoanStatusBadge status={loan.status} className="mt-1" />
+          )}
         </div>
         <div className="text-right">
           <p className="text-sm text-gray-600">Total Owed</p>
@@ -87,10 +115,17 @@ export function LoanCard({ loan, variant = "compact" }: LoanCardProps) {
             <span className="text-gray-600">Repayment Progress</span>
             <span className="font-medium">{progress.toFixed(1)}%</span>
           </div>
-          <div className="w-full bg-gray-200 rounded-full h-2">
+          <div
+            className="w-full bg-gray-200 rounded-full h-2"
+            role="progressbar"
+            aria-valuenow={Math.round(progress)}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-label={`Repayment progress: ${progress.toFixed(1)}%`}
+          >
             <div
               className="bg-blue-600 h-2 rounded-full"
-              style={{ width: `${Math.min(progress, 100)}%` }}
+              style={{ width: `${progress}%` }}
             />
           </div>
         </div>
@@ -119,7 +154,9 @@ export function LoanCard({ loan, variant = "compact" }: LoanCardProps) {
         <div className={`p-4 rounded-lg ${deadlineBg}`}>
           <p className="text-sm text-gray-600 mb-1">Next Payment</p>
           <p
-            className={`${variant === "compact" ? "text-lg" : "text-sm"} font-semibold ${deadlineTextColor}`}
+            className={`${
+              variant === "compact" ? "text-lg" : "text-sm"
+            } font-semibold ${deadlineTextColor}`}
           >
             {formatDate(loan.nextPaymentDeadline)}
           </p>
@@ -129,16 +166,33 @@ export function LoanCard({ loan, variant = "compact" }: LoanCardProps) {
 
       {/* Actions */}
       <div className="flex gap-3">
-        <Button
-          onClick={() => router.push(`/repay/${loan.id}`)}
-          className="flex-1"
-          variant={isOverdue || isUrgent ? "primary" : "outline"}
-        >
-          {isOverdue ? "Pay Now (Overdue)" : "Repay Now"}
-        </Button>
-        <Button variant="outline" onClick={() => router.push(`/loans/${loan.id}`)}>
-          {variant === "compact" ? "View Details" : "Details"}
-        </Button>
+        {isTerminalDistressed ? (
+          <>
+            <Button
+              onClick={() => router.push(`/loans/${loan.id}`)}
+              className="flex-1"
+              variant="primary"
+            >
+              Contact Support
+            </Button>
+            <Button variant="outline" onClick={() => router.push(`/loans/${loan.id}`)}>
+              {variant === "compact" ? "View Details" : "Details"}
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button
+              onClick={() => router.push(`/repay/${loan.id}`)}
+              className="flex-1"
+              variant={isOverdue || isUrgent ? "primary" : "outline"}
+            >
+              {isOverdue ? "Pay Now (Overdue)" : "Repay Now"}
+            </Button>
+            <Button variant="outline" onClick={() => router.push(`/loans/${loan.id}`)}>
+              {variant === "compact" ? "View Details" : "Details"}
+            </Button>
+          </>
+        )}
       </div>
     </Card>
   );

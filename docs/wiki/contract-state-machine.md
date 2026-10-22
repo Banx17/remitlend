@@ -63,7 +63,12 @@ stateDiagram-v2
 
 ### Remittance NFT Storage
 - `DataKey::Score(Address)`: User credit score (0-1000).
-- `DataKey::Minter`: Authorized address allowed to update scores (usually the Backend Oracle).
+- `DataKey::AuthorizedMinter(Address)`: Membership flag for each authorized minter address.
+- `DataKey::AuthorizedMinters`: Enumerated `Vec<Address>` of authorized minters (max 32).
+
+### Remittance NFT Admin Views
+- `is_authorized_minter(addr) -> bool`: Checks whether a specific address can mint.
+- `get_authorized_minters() -> Vec<Address>`: Returns the current authorized minter set for audit and admin UIs.
 
 ## Security & Constraints
 - **Atomic State Transitions**: All state changes are completed within a single Soroban transaction.

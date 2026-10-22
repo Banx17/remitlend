@@ -9,25 +9,28 @@ export const shorthands = undefined;
  * @returns {Promise<void> | void}
  */
 export const up = (pgm) => {
-  pgm.createTable("user_profiles", {
-    id: "id",
-    public_key: { type: "varchar(255)", notNull: true, unique: true },
-    display_name: { type: "varchar(255)" },
-    email: { type: "varchar(255)" },
+  pgm.createTable('user_profiles', {
+    id: 'id',
+    public_key: { type: 'varchar(255)', notNull: true, unique: true },
+    display_name: { type: 'varchar(255)' },
+    email: { type: 'varchar(255)' },
+    phone: { type: 'varchar(50)' },
+    email_enabled: { type: 'boolean', notNull: true, default: true },
+    sms_enabled: { type: 'boolean', notNull: true, default: true },
     created_at: {
-      type: "timestamp",
+      type: 'timestamp',
       notNull: true,
-      default: pgm.func("current_timestamp"),
+      default: pgm.func('current_timestamp'),
     },
     updated_at: {
-      type: "timestamp",
+      type: 'timestamp',
       notNull: true,
-      default: pgm.func("current_timestamp"),
+      default: pgm.func('current_timestamp'),
     },
-    metadata: { type: "jsonb" },
+    metadata: { type: 'jsonb' },
   });
 
-  pgm.createIndex("user_profiles", "public_key");
+  pgm.createIndex('user_profiles', 'public_key');
 };
 
 /**
@@ -36,5 +39,5 @@ export const up = (pgm) => {
  * @returns {Promise<void> | void}
  */
 export const down = (pgm) => {
-  pgm.dropTable("user_profiles");
+  pgm.dropTable('user_profiles');
 };

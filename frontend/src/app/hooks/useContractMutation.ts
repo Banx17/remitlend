@@ -19,7 +19,7 @@
 
 import { type UseMutationResult } from "@tanstack/react-query";
 import { useContractToast } from "./useContractToast";
-import { useCallback, useRef } from "react";
+import { useCallback } from "react";
 import { useGamificationStore } from "../stores/useGamificationStore";
 
 interface ContractMutationOptions {
@@ -51,7 +51,6 @@ export function useContractMutation<TData extends { txHash?: string }, TError, T
 ) {
   const toast = useContractToast();
   const gamificationStore = useGamificationStore();
-  const toastIdRef = useRef<string | number | null>(null);
 
   const {
     pendingMessage = "Processing transaction...",
@@ -80,69 +79,65 @@ export function useContractMutation<TData extends { txHash?: string }, TError, T
     }
   }, [gamificationXP, gamificationReason, gamificationAchievement, gamificationStore]);
 
-  const mutate = useCallback(
-    (variables: TVariables, mutationOptions?: Parameters<typeof mutation.mutate>[1]) => {
-      if (!disableToast) {
-        toastIdRef.current = toast.showPending(pendingMessage);
-      }
+  const mutate = (
+    variables: TVariables,
+    mutationOptions?: Parameters<typeof mutation.mutate>[1],
+  ) => {
+    const toastId = !disableToast ? toast.showPending(pendingMessage) : null;
 
-      mutation.mutate(variables, {
-        ...mutationOptions,
-        onSuccess: (data, vars, onMutateResult, context) => {
-          if (!disableToast && toastIdRef.current !== null) {
-            toast.showSuccess(toastIdRef.current, {
-              successMessage,
-              txHash: data.txHash,
-              network,
-            });
-          }
-          triggerGamification();
-          mutationOptions?.onSuccess?.(data, vars, onMutateResult, context);
-        },
-        onError: (error, vars, onMutateResult, context) => {
-          if (!disableToast && toastIdRef.current !== null) {
-            toast.showError(toastIdRef.current, {
-              errorMessage: error instanceof Error ? error.message : errorMessage,
-            });
-          }
-          mutationOptions?.onError?.(error, vars, onMutateResult, context);
-        },
-      });
-    },
-    [mutation, toast, pendingMessage, successMessage, errorMessage, network, disableToast],
-  );
-
-  const mutateAsync = useCallback(
-    async (variables: TVariables, mutationOptions?: Parameters<typeof mutation.mutateAsync>[1]) => {
-      if (!disableToast) {
-        toastIdRef.current = toast.showPending(pendingMessage);
-      }
-
-      try {
-        const data = await mutation.mutateAsync(variables, mutationOptions);
-
-        if (!disableToast && toastIdRef.current !== null) {
-          toast.showSuccess(toastIdRef.current, {
+    mutation.mutate(variables, {
+      ...mutationOptions,
+      onSuccess: (data, vars, onMutateResult, context) => {
+        if (!disableToast && toastId !== null) {
+          toast.showSuccess(toastId, {
             successMessage,
             txHash: data.txHash,
             network,
           });
         }
-
         triggerGamification();
-
-        return data;
-      } catch (error) {
-        if (!disableToast && toastIdRef.current !== null) {
-          toast.showError(toastIdRef.current, {
+        mutationOptions?.onSuccess?.(data, vars, onMutateResult, context);
+      },
+      onError: (error, vars, onMutateResult, context) => {
+        if (!disableToast && toastId !== null) {
+          toast.showError(toastId, {
             errorMessage: error instanceof Error ? error.message : errorMessage,
           });
         }
-        throw error;
+        mutationOptions?.onError?.(error, vars, onMutateResult, context);
+      },
+    });
+  };
+
+  const mutateAsync = async (
+    variables: TVariables,
+    mutationOptions?: Parameters<typeof mutation.mutateAsync>[1],
+  ) => {
+    const toastId = !disableToast ? toast.showPending(pendingMessage) : null;
+
+    try {
+      const data = await mutation.mutateAsync(variables, mutationOptions);
+
+      if (!disableToast && toastId !== null) {
+        toast.showSuccess(toastId, {
+          successMessage,
+          txHash: data.txHash,
+          network,
+        });
       }
-    },
-    [mutation, toast, pendingMessage, successMessage, errorMessage, network, disableToast],
-  );
+
+      triggerGamification();
+
+      return data;
+    } catch (error) {
+      if (!disableToast && toastId !== null) {
+        toast.showError(toastId, {
+          errorMessage: error instanceof Error ? error.message : errorMessage,
+        });
+      }
+      throw error;
+    }
+  };
 
   return {
     ...mutation,

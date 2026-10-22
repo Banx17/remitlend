@@ -4,25 +4,98 @@ Soroban smart contracts for the RemitLend decentralized lending platform on Stel
 
 ## Overview
 
-RemitLend uses three core smart contracts:
+RemitLend uses four core smart contracts:
 
 1. **Remittance NFT** - Stores credit scores and remittance history as NFTs
 2. **Loan Manager** - Manages the complete loan lifecycle
 3. **Lending Pool** - Handles liquidity deposits and withdrawals
+4. **Multisig Governance** - Manages timelocked multi-signature administrative transitions across protocol contracts
+
+### Protocol Admin API
+
+All protocol contracts (`Remittance NFT`, `Loan Manager`, `Lending Pool`) implement a consistent administrative API:
+- `pub fn propose_admin(env: Env, new_admin: Address)`: Proposes a new administrator (gated by current admin auth).
+- `pub fn accept_admin(env: Env)`: Accepts the proposed administrator role (gated by proposed admin auth).
+- `pub fn set_admin(env: Env, new_admin: Address)`: Direct admin transfer (gated by current admin auth).
+
+When `MultisigGovernance::finalize_admin_transfer` executes, it cross-invokes `propose_admin(new_admin)` on all configured targets, enabling the incoming admin to call `accept_admin` to complete the transfer.
+
+### `fix_args.py` (one-time migration helper)
+
+`contracts/fix_args.py` is a **one-time** migration helper. It patches
+`contracts/remittance_nft/src/test.rs` (swapped `commitment`/`uri` args, event
+encoding fixes). It is not part of the normal build/test workflow — run it once
+from the repo root with:
+
+```bash
+python3 contracts/fix_args.py
+```
+
+Re-running it afterwards is harmless (the substitutions become no-ops).
 
 ## Prerequisites
 
-- [Rust Toolchain](https://www.rust-lang.org/tools/install) (latest stable)
-- [Soroban CLI](https://soroban.stellar.org/docs/getting-started/setup)
+- [Rust Toolchain](https://www.rust-lang.org/tools/install) installed via `rustup` **1.23.0 or newer**
+- [Soroban CLI](https://soroban.stellar.org/docs/getting-started/setup) (v22.0.0+)
 - [wasm32-unknown-unknown target](https://doc.rust-lang.org/rustc/platform-support/wasm32-unknown-unknown.html)
+
+### Required Versions
+
+| Dependency    | Version |
+| ------------- | ------- |
+| `soroban-sdk` | 22.0.0  |
+| `soroban-cli` | 22.0.0+ |
+
+> These versions are pinned in `contracts/Cargo.toml` — keep the two files in sync when upgrading.
+
+### The pinned toolchain
+
+This directory contains a `rust-toolchain.toml` that pins the exact toolchain
+used to build the contracts:
+
+```toml
+[toolchain]
+channel = "1.85.0"
+targets = ["wasm32-unknown-unknown"]
+components = ["rustfmt", "clippy"]
+```
+
+**You do not need to install this toolchain yourself.** Any `cargo` or `rustc`
+command run from inside `contracts/` is intercepted by `rustup`, which reads
+this file, downloads the pinned toolchain and the `wasm32-unknown-unknown`
+target on first use, and runs the real command with them. The first build after
+cloning will therefore pause to download a toolchain — that is expected, not a
+failure.
+
+The pin is what makes builds reproducible: a WASM built on a different compiler
+version can differ byte-for-byte, which breaks on-chain hash verification even
+when the source is identical. Do not work around it by overriding the channel.
+
+**Minimum rustup version: 1.23.0**, the release that added `rust-toolchain.toml`
+support. On anything older the file is ignored and you get confusing errors —
+typically a compile failure against your system toolchain, or
+`error: target 'wasm32-unknown-unknown' not found`, rather than a clear message
+about the pin. Check and upgrade with:
+
+```bash
+rustup --version
+rustup self update
+```
+
+If you must confirm the pin is active, run `rustup show` from `contracts/` —
+the pinned version should be listed as the active toolchain, with `overridden
+by` pointing at `rust-toolchain.toml`.
 
 ### Installation
 
 ```bash
-# Install Rust
+# Install Rust (rustup 1.23.0+; skip if already installed, then `rustup self update`)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Add wasm32 target
+# Add wasm32 target.
+# Optional here — rust-toolchain.toml already declares it, so rustup installs
+# it automatically for the pinned toolchain on first build. Harmless to run,
+# and useful if you also build outside this directory.
 rustup target add wasm32-unknown-unknown
 
 # Install Soroban CLI
@@ -80,13 +153,14 @@ cargo build -p lending_pool --target wasm32-unknown-unknown --release
 
 ### Build Output
 
-Compiled WASM files are located at:
-```
-target/wasm32-unknown-unknown/release/
-├── remittance_nft.wasm
-├── loan_manager.wasm
-└── lending_pool.wasm
-```
+Compiled WASM files are located at `target/wasm32-unknown-unknown/release/`.
+When built via `./scripts/build.sh` with the Stellar/Soroban CLI installed, each contract generates an optimized binary:
+- `remittance_nft.optimized.wasm` (canonical)
+- `loan_manager.optimized.wasm` (canonical)
+- `lending_pool.optimized.wasm` (canonical)
+- `multisig_governance.optimized.wasm` (canonical)
+
+Unoptimized artifacts (`<name>.wasm`) are retained as fallbacks if the optimization pass is skipped.
 
 ## Testing
 

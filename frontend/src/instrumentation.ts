@@ -13,6 +13,6 @@ export const onRequestError = async (
   ...args: any[]
 ) => {
   const { captureRequestError } = await import("@sentry/nextjs");
-  // @ts-expect-error – captureRequestError accepts spread args matching Next.js internals
-  captureRequestError(...args);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  captureRequestError(...(args as Parameters<typeof captureRequestError>));
 };

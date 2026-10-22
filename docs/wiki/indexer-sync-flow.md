@@ -62,3 +62,6 @@ The indexer runs as a background process (`indexerManager.ts`) that initiates pe
 - `backend/src/services/eventIndexer.ts`: Core logic for polling and processing.
 - `backend/src/services/indexerManager.ts`: Lifecycle management for the indexer.
 - `backend/src/db/connection.js`: Database connection and query execution.
+
+## Related Documentation
+- [Indexer Recovery Runbook](../runbooks/indexer-recovery.md) — Procedures for handling indexer lag, RPC outages, and quarantined events.

@@ -236,6 +236,7 @@ export const useGamificationStore = create<GamificationStore>()(
           const { xp, level } = get();
           const newLevel = calculateLevel(xp);
 
+          // Only trigger level-up celebration when new level strictly exceeds current level
           if (newLevel > level) {
             const levelUpReward = LEVEL_THRESHOLDS.find((t) => t.level === newLevel);
             if (levelUpReward) {
@@ -323,6 +324,19 @@ export const useGamificationStore = create<GamificationStore>()(
       }),
       {
         name: "remitlend-gamification",
+        // Only persist durable progression and settings. Transient UI flags
+        // (showLevelUpModal, pendingLevelUp, recentXPGain) must not survive a
+        // reload, otherwise the level-up modal and XP animation replay on
+        // refresh. See useWalletStore for the same pattern.
+        partialize: (state) => ({
+          level: state.level,
+          xp: state.xp,
+          kingdomTitle: state.kingdomTitle,
+          achievements: state.achievements,
+          soundEnabled: state.soundEnabled,
+          animationsEnabled: state.animationsEnabled,
+          soundVolume: state.soundVolume,
+        }),
       },
     ),
     { name: "GamificationStore" },

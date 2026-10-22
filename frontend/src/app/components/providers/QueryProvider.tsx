@@ -12,6 +12,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
 import { useState, type ReactNode } from "react";
+import { SessionExpiryHandler } from "./SessionExpiryHandler";
 
 interface QueryProviderProps {
   children: ReactNode;
@@ -29,14 +30,23 @@ export function QueryProvider({ children }: QueryProviderProps) {
           queries: {
             // Data is considered fresh for 60 seconds — avoids unnecessary refetches
             staleTime: 60 * 1000,
-            // Retry failed requests once before showing an error
-            retry: 1,
+            // Retry failed requests (but don't spin when offline)
+            retry: (failureCount) => {
+              if (typeof navigator !== "undefined" && navigator.onLine === false) {
+                return false;
+              }
+              return failureCount < 2;
+            },
             // Refetch when the browser window regains focus
             refetchOnWindowFocus: true,
+            // Refetch when connection is restored
+            refetchOnReconnect: true,
           },
           mutations: {
-            // Retry failed mutations once
-            retry: 1,
+            // Never retry mutations: most mutationFns are non-idempotent
+            // (loan repayment, remittance creation, etc.) and retrying after
+            // a transient error can duplicate a request the server already processed.
+            retry: false,
           },
         },
       }),
@@ -44,6 +54,8 @@ export function QueryProvider({ children }: QueryProviderProps) {
 
   return (
     <QueryClientProvider client={queryClient}>
+      {/* Listen for 401 auth:session-expired events and trigger full logout */}
+      <SessionExpiryHandler />
       {children}
       {/* DevTools only render in development */}
       <ReactQueryDevtools initialIsOpen={false} />

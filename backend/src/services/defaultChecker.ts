@@ -1,21 +1,171 @@
 import {
+  Account,
   BASE_FEE,
   Keypair,
-  Networks,
   Operation,
   TransactionBuilder,
   nativeToScVal,
+  scValToNative,
   rpc,
-} from "@stellar/stellar-sdk";
-import { query } from "../db/connection.js";
-import logger from "../utils/logger.js";
-import { AppError } from "../errors/AppError.js";
+  xdr,
+} from '@stellar/stellar-sdk';
+import { query } from '../db/connection.js';
+import logger from '../utils/logger.js';
+import { AppError } from '../errors/AppError.js';
+import { createSorobanRpcServer, getStellarNetworkPassphrase } from '../config/stellar.js';
+
+import { cacheService } from './cacheService.js';
+import { jobMetricsService } from './jobMetricsService.js';
+import { fromStroops } from '../money/decimal.js';
+import { hasUnresolvedLedgerGaps } from './ledgerCheckpoints.js';
+
+/**
+ * Owed-vs-paid reconciliation for a single loan, computed entirely in
+ * `bigint` stroops (see `backend/src/money/decimal.ts`). `owedStroops` is
+ * the originally approved principal; `paidStroops` is the principal
+ * component of every `LoanRepaid` amount, capped at `owedStroops`.
+ * `driftStroops` is `owedStroops - paidStroops`. LoanRepaid amounts include
+ * yield (interest + late fees), so capping at principal prevents false
+ * drift on fully repaid loans with interest (#1601).
+ */
+export interface LoanReconciliation {
+  loanId: number;
+  owedStroops: bigint;
+  paidStroops: bigint;
+  driftStroops: bigint;
+  owedDisplay: string;
+  paidDisplay: string;
+}
+
+/**
+ * Sums the `LoanApproved` principal and every `LoanRepaid` amount recorded
+ * for `loanId` in `contract_events`, in exact integer stroops. Every
+ * comparison here is `bigint` arithmetic — never `Number` — so the result
+ * agrees with the on-chain pool balance to the stroop, regardless of how
+ * large the amount is.
+ */
+export async function reconcileLoanStroops(loanId: number): Promise<LoanReconciliation> {
+  const result = await query(
+    `
+    SELECT event_type, amount
+    FROM contract_events
+    WHERE loan_id = $1
+      AND event_type IN ('LoanApproved', 'LoanRepaid')
+      AND amount IS NOT NULL
+    `,
+    [loanId],
+  );
+
+  let owedStroops = 0n;
+  let paidStroops = 0n;
+  for (const row of result.rows as Array<{ event_type: string; amount: string }>) {
+    const amount = BigInt(row.amount);
+    if (row.event_type === 'LoanApproved') {
+      owedStroops += amount;
+    } else {
+      paidStroops += amount;
+    }
+  }
+
+  // FIX: Cap paidStroops at owedStroops. LoanRepaid.amount includes yield
+  // (interest + late fees) on top of principal. Once the principal is fully
+  // repaid, any excess is yield — not drift.
+  const principalPaidStroops = paidStroops > owedStroops ? owedStroops : paidStroops;
+  const driftStroops = owedStroops - principalPaidStroops;
+
+  return {
+    loanId,
+    owedStroops,
+    paidStroops: principalPaidStroops,
+    driftStroops,
+    owedDisplay: fromStroops(owedStroops),
+    paidDisplay: fromStroops(principalPaidStroops),
+  };
+}
 
 /**
  * Mirrors `LoanManager::DEFAULT_TERM_LEDGERS` in `contracts/loan_manager/src/lib.rs`.
  * Used to estimate on-chain due ledgers from indexed `LoanApproved` events.
  */
 const DEFAULT_TERM_LEDGERS = 17_280;
+const LOCK_KEY = 'default_checker:running';
+const LOCK_TTL_SECONDS = 600; // 10 minutes - prevents stuck locks from crashed runs
+
+const OVERDUE_LOAN_CTES = `
+  WITH approved AS (
+    SELECT
+      loan_id,
+      MAX(ledger) AS approved_ledger,
+      MAX(term_ledgers) FILTER (WHERE event_type = 'LoanApproved') AS approved_term_ledgers
+    FROM contract_events
+    WHERE event_type = 'LoanApproved'
+      AND loan_id IS NOT NULL
+    GROUP BY loan_id
+  ),
+  extensions AS (
+    SELECT loan_id, MAX(due_ledger) AS extended_due_ledger
+    FROM contract_events
+    WHERE event_type = 'LoanExtended'
+      AND loan_id IS NOT NULL
+      AND due_ledger IS NOT NULL
+    GROUP BY loan_id
+  ),
+  active AS (
+    SELECT
+      a.loan_id,
+      COALESCE(
+        x.extended_due_ledger,
+        a.approved_ledger + COALESCE(NULLIF(a.approved_term_ledgers, 0), $1)
+      ) AS due_ledger
+    FROM approved a
+    LEFT JOIN extensions x ON x.loan_id = a.loan_id
+    WHERE NOT EXISTS (
+      SELECT 1 FROM contract_events e
+      WHERE e.loan_id = a.loan_id AND e.event_type = 'LoanDefaulted'
+    )
+    -- LoanRepaid is emitted for both partial and full payments, so its mere
+    -- presence cannot establish terminal repayment. The Soroban contract's
+    -- check_defaults verifies LoanStatus::Approved before changing any loan.
+  ),
+  overdue AS (
+    SELECT * FROM active WHERE due_ledger < $2
+  )
+`;
+
+/**
+ * Older indexed LoanExtended rows predate the due_ledger column. Recover the
+ * absolute due ledger from their original Soroban event payload, once, so an
+ * already-extended loan is not evaluated against its original term.
+ */
+async function backfillExtensionDueLedgers(): Promise<void> {
+  const result = await query(
+    `SELECT id, value FROM contract_events
+     WHERE event_type = 'LoanExtended' AND due_ledger IS NULL AND value IS NOT NULL`,
+  );
+
+  for (const row of result.rows as Array<{ id: number; value: string }>) {
+    // Allows simple query mocks and partially populated test fixtures to
+    // return no-op rows; real database rows always have both fields.
+    if (!Number.isInteger(row.id) || typeof row.value !== 'string') continue;
+    try {
+      const decoded = scValToNative(xdr.ScVal.fromXDR(row.value, 'base64'));
+      const dueLedger = Array.isArray(decoded) ? Number(decoded[0]) : NaN;
+      if (!Number.isSafeInteger(dueLedger) || dueLedger <= 0) {
+        throw new Error('invalid new_due_ledger in LoanExtended payload');
+      }
+      await query(
+        'UPDATE contract_events SET due_ledger = $1 WHERE id = $2 AND due_ledger IS NULL',
+        [dueLedger, row.id],
+      );
+    } catch (error) {
+      logger.withContext().error('Failed to backfill LoanExtended due ledger', {
+        eventRowId: row.id,
+        error,
+      });
+      throw error;
+    }
+  }
+}
 
 export interface DefaultCheckBatchResult {
   loanIds: number[];
@@ -23,6 +173,7 @@ export interface DefaultCheckBatchResult {
   submitStatus?: string;
   txStatus?: string;
   error?: string;
+  timedOut?: boolean;
 }
 
 export interface DefaultCheckRunResult {
@@ -30,13 +181,25 @@ export interface DefaultCheckRunResult {
   currentLedger: number;
   termLedgers: number;
   overdueCount: number;
+  loansChecked: number;
+  successfulSubmissions: number;
+  failedSubmissions: number;
   oldestDueLedger?: number;
   ledgersPastOldestDue?: number;
   batches: DefaultCheckBatchResult[];
+  /**
+   * True when this run was deliberately skipped instead of evaluating loans
+   * — currently only set when the indexer has an unresolved ('suspect')
+   * ledger gap for the loan manager contract (issue #1376). Conclusions
+   * drawn from `contract_events` are unreliable until the gap is
+   * reconciled, so no defaults are submitted for this run.
+   */
+  skipped?: boolean;
+  skippedReason?: string;
 }
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
-  const n = parseInt(value ?? "", 10);
+  const n = parseInt(value ?? '', 10);
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
@@ -49,42 +212,53 @@ function chunk<T>(items: T[], size: number): T[][] {
   return out;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
+async function mapConcurrent<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let currentIndex = 0;
+  const worker = async () => {
+    while (currentIndex < items.length) {
+      const index = currentIndex++;
+      const item = items[index];
+      if (item !== undefined) {
+        results[index] = await fn(item);
+      }
+    }
+  };
+  const workers = [];
+  for (let i = 0; i < Math.min(limit, items.length); i++) {
+    workers.push(worker());
+  }
+  await Promise.all(workers);
+  return results;
 }
 
 export class DefaultChecker {
-  private rpcUrl: string;
   private contractId: string;
   private termLedgers: number;
   private batchSize: number;
+  private batchTimeoutMs: number;
   private maxLoansPerRun: number;
   private pollAttempts: number;
   private pollSleepMs: number;
+  private concurrency: number;
+  private currentLockValue: string | null = null;
 
   constructor() {
-    this.rpcUrl =
-      process.env.STELLAR_RPC_URL || "https://soroban-testnet.stellar.org";
-    this.contractId = process.env.LOAN_MANAGER_CONTRACT_ID || "";
-    this.termLedgers = parsePositiveInt(
-      process.env.LOAN_TERM_LEDGERS,
-      DEFAULT_TERM_LEDGERS,
-    );
+    this.contractId = process.env.LOAN_MANAGER_CONTRACT_ID || '';
+    this.termLedgers = parsePositiveInt(process.env.LOAN_TERM_LEDGERS, DEFAULT_TERM_LEDGERS);
     this.batchSize = parsePositiveInt(process.env.DEFAULT_CHECK_BATCH_SIZE, 25);
-    this.maxLoansPerRun = parsePositiveInt(
-      process.env.DEFAULT_CHECK_MAX_LOANS_PER_RUN,
-      500,
+    this.batchTimeoutMs = parsePositiveInt(
+      process.env.DEFAULT_CHECK_BATCH_TIMEOUT_MS,
+      5 * 60 * 1000,
     );
-    this.pollAttempts = parsePositiveInt(
-      process.env.DEFAULT_CHECK_POLL_ATTEMPTS,
-      30,
-    );
-    this.pollSleepMs = parsePositiveInt(
-      process.env.DEFAULT_CHECK_POLL_SLEEP_MS,
-      1_000,
-    );
+    this.maxLoansPerRun = parsePositiveInt(process.env.DEFAULT_CHECK_MAX_LOANS_PER_RUN, 500);
+    this.pollAttempts = parsePositiveInt(process.env.DEFAULT_CHECK_POLL_ATTEMPTS, 30);
+    this.pollSleepMs = parsePositiveInt(process.env.DEFAULT_CHECK_POLL_SLEEP_MS, 1_000);
+    this.concurrency = parsePositiveInt(process.env.DEFAULT_CHECK_CONCURRENCY, 3);
   }
 
   private assertConfigured(): {
@@ -94,14 +268,14 @@ export class DefaultChecker {
   } {
     if (!this.contractId) {
       throw AppError.internal(
-        "Default checker misconfiguration: LOAN_MANAGER_CONTRACT_ID is not set",
+        'Default checker misconfiguration: LOAN_MANAGER_CONTRACT_ID is not set',
       );
     }
 
     const secret = process.env.LOAN_MANAGER_ADMIN_SECRET;
     if (!secret) {
       throw AppError.internal(
-        "Default checker misconfiguration: LOAN_MANAGER_ADMIN_SECRET is not set",
+        'Default checker misconfiguration: LOAN_MANAGER_ADMIN_SECRET is not set',
       );
     }
 
@@ -110,45 +284,39 @@ export class DefaultChecker {
       signer = Keypair.fromSecret(secret);
     } catch {
       throw AppError.internal(
-        "Default checker misconfiguration: LOAN_MANAGER_ADMIN_SECRET is invalid",
+        'Default checker misconfiguration: LOAN_MANAGER_ADMIN_SECRET is invalid',
       );
     }
 
-    const allowHttp = this.rpcUrl.startsWith("http://");
-    const server = new rpc.Server(this.rpcUrl, { allowHttp });
-
-    const passphrase =
-      process.env.STELLAR_NETWORK_PASSPHRASE || Networks.TESTNET;
+    const server = createSorobanRpcServer();
+    const passphrase = getStellarNetworkPassphrase();
 
     return { signer, server, passphrase };
   }
 
+  /**
+   * Whether the indexer has an unresolved ('suspect') ledger gap for the
+   * loan manager contract. `fetchOverdueLoanIds`/`fetchOverdueStats` derive
+   * loan state entirely from indexed `contract_events`, so a gap means a
+   * `LoanApproved`, `LoanRepaid`, or `LoanDefaulted` event could be missing
+   * — submitting `check_defaults` against that view risks a false default
+   * (issue #1376). Extracted as its own method so tests can stub it out
+   * without needing a live database.
+   */
+  private async hasSuspectLedgerRanges(): Promise<boolean> {
+    if (!this.contractId) return false;
+    return hasUnresolvedLedgerGaps(this.contractId);
+  }
+
+  /**
+   * Fetches IDs of loans that are overdue based on the current ledger sequence.
+   * Queries the local database for active loans exceeding the term limit.
+   */
   private async fetchOverdueLoanIds(currentLedger: number): Promise<number[]> {
     const result = await query(
-      `
-      WITH approved AS (
-        SELECT loan_id, MAX(ledger) AS approved_ledger
-        FROM loan_events
-        WHERE event_type = 'LoanApproved'
-          AND loan_id IS NOT NULL
-        GROUP BY loan_id
-      ),
-      active AS (
-        SELECT
-          a.loan_id,
-          a.approved_ledger,
-          (a.approved_ledger + $1) AS due_ledger
-        FROM approved a
-        WHERE NOT EXISTS (
-          SELECT 1
-          FROM loan_events e
-          WHERE e.loan_id = a.loan_id
-            AND e.event_type IN ('LoanRepaid', 'LoanDefaulted')
-        )
-      )
+      `${OVERDUE_LOAN_CTES}
       SELECT loan_id
-      FROM active
-      WHERE due_ledger < $2
+      FROM overdue
       ORDER BY due_ledger ASC, loan_id ASC
       LIMIT $3
       `,
@@ -160,37 +328,17 @@ export class DefaultChecker {
       .filter((id: number) => Number.isInteger(id) && id > 0);
   }
 
+  /**
+   * Calculates statistics for all currently overdue loans.
+   * Provides the total count and the age of the oldest overdue loan for monitoring.
+   */
   private async fetchOverdueStats(currentLedger: number): Promise<{
     overdueCount: number;
     oldestDueLedger?: number;
     ledgersPastOldestDue?: number;
   }> {
     const result = await query(
-      `
-      WITH approved AS (
-        SELECT loan_id, MAX(ledger) AS approved_ledger
-        FROM loan_events
-        WHERE event_type = 'LoanApproved'
-          AND loan_id IS NOT NULL
-        GROUP BY loan_id
-      ),
-      active AS (
-        SELECT
-          a.loan_id,
-          (a.approved_ledger + $1) AS due_ledger
-        FROM approved a
-        WHERE NOT EXISTS (
-          SELECT 1
-          FROM loan_events e
-          WHERE e.loan_id = a.loan_id
-            AND e.event_type IN ('LoanRepaid', 'LoanDefaulted')
-        )
-      ),
-      overdue AS (
-        SELECT *
-        FROM active
-        WHERE due_ledger < $2
-      )
+      `${OVERDUE_LOAN_CTES}
       SELECT
         COUNT(*)::bigint AS overdue_count,
         MIN(due_ledger) AS oldest_due_ledger
@@ -206,12 +354,9 @@ export class DefaultChecker {
         }
       | undefined;
 
-    const overdueCount =
-      row?.overdue_count != null ? Number(row.overdue_count) : 0;
+    const overdueCount = row?.overdue_count != null ? Number(row.overdue_count) : 0;
     const oldestDueLedger =
-      row?.oldest_due_ledger != null
-        ? Number(row.oldest_due_ledger)
-        : undefined;
+      row?.oldest_due_ledger != null ? Number(row.oldest_due_ledger) : undefined;
 
     const ledgersPastOldestDue =
       oldestDueLedger != null && Number.isFinite(oldestDueLedger)
@@ -225,15 +370,23 @@ export class DefaultChecker {
     };
   }
 
+  /**
+   * Builds and submits a Soroban transaction to mark loans as defaulted.
+   * Invokes `check_defaults` on-chain; results in state changes and fee consumption.
+   */
   private async submitCheckDefaults(
     server: rpc.Server,
     signer: Keypair,
     passphrase: string,
     loanIds: number[],
+    account: Account,
   ): Promise<DefaultCheckBatchResult> {
-    const account = await server.getAccount(signer.publicKey());
-
-    const loanIdsScVal = nativeToScVal(loanIds, { type: "u32" });
+    // `nativeToScVal` with a `type` hint applies to a single scalar value, not
+    // to each element of an array — passing `loanIds` (a number[]) directly
+    // with `{ type: 'u32' }` throws a TypeError. Build the u32 elements
+    // individually and wrap them in a Vec to match the contract's
+    // `check_defaults(loan_ids: Vec<u32>)` signature.
+    const loanIdsScVal = xdr.ScVal.scvVec(loanIds.map((id) => nativeToScVal(id, { type: 'u32' })));
 
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
@@ -242,7 +395,7 @@ export class DefaultChecker {
       .addOperation(
         Operation.invokeContractFunction({
           contract: this.contractId,
-          function: "check_defaults",
+          function: 'check_defaults',
           args: [loanIdsScVal],
         }),
       )
@@ -274,7 +427,7 @@ export class DefaultChecker {
       return {
         loanIds,
         ...(submitStatus !== undefined ? { submitStatus } : {}),
-        error: "sendTransaction returned no hash",
+        error: 'sendTransaction returned no hash',
       };
     }
 
@@ -287,7 +440,7 @@ export class DefaultChecker {
       txStatus = polled.status;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger.warn("Default check transaction polling failed", {
+      logger.withContext().warn('Default check transaction polling failed', {
         txHash,
         message,
       });
@@ -302,85 +455,375 @@ export class DefaultChecker {
   }
 
   /**
+   * Executes `submitCheckDefaults` with a maximum execution time limit.
+   * Ensures that slow Soroban RPC responses do not block the entire processing queue.
+   */
+  private async submitCheckDefaultsWithTimeout(
+    server: rpc.Server,
+    signer: Keypair,
+    passphrase: string,
+    loanIds: number[],
+    account: Account,
+  ): Promise<DefaultCheckBatchResult> {
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+
+    const timeoutPromise = new Promise<DefaultCheckBatchResult>((resolve) => {
+      timeoutHandle = setTimeout(() => {
+        resolve({
+          loanIds,
+          timedOut: true,
+          error: `batch timed out after ${this.batchTimeoutMs}ms`,
+        });
+      }, this.batchTimeoutMs);
+      timeoutHandle.unref?.();
+    });
+
+    const submissionPromise: Promise<DefaultCheckBatchResult> = this.submitCheckDefaults(
+      server,
+      signer,
+      passphrase,
+      loanIds,
+      account,
+    ).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        loanIds,
+        error: `default check batch failed: ${message}`,
+      } satisfies DefaultCheckBatchResult;
+    });
+
+    const result = await Promise.race([submissionPromise, timeoutPromise]);
+
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+
+    if (result.timedOut) {
+      logger.withContext().warn('Default check batch timed out', {
+        loanIds,
+        timeoutMs: this.batchTimeoutMs,
+      });
+    }
+
+    return result;
+  }
+
+  /**
+   * Acquires a distributed lock using Redis SET NX with TTL.
+   * Returns true if lock acquired, false if another instance is running.
+   */
+  private async acquireLock(): Promise<boolean> {
+    try {
+      const lockValue = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const acquired = await cacheService.setNotExists(LOCK_KEY, lockValue, LOCK_TTL_SECONDS);
+      if (acquired) {
+        this.currentLockValue = lockValue;
+      }
+      return acquired;
+    } catch (error) {
+      logger.withContext().error('Failed to acquire default checker lock', { error });
+      return false;
+    }
+  }
+
+  /**
+   * Releases the distributed lock only when the stored value matches the value
+   * this instance set at acquire time.  A run that outlives the TTL cannot
+   * delete a lock that now belongs to a different instance.
+   */
+  private async releaseLock(): Promise<void> {
+    const value = this.currentLockValue;
+    this.currentLockValue = null;
+
+    if (!value) return;
+
+    try {
+      const released = await cacheService.deleteIfMatch(LOCK_KEY, value);
+      if (!released) {
+        logger
+          .withContext()
+          .warn(
+            'default_checker: lock already expired or owned by another instance — skipping delete',
+          );
+      }
+    } catch (error) {
+      logger.withContext().error('Failed to release default checker lock', { error });
+    }
+  }
+
+  /**
    * Runs default checks for either:
    * - explicit `loanIds` (validated + de-duped), or
    * - all overdue loans discovered from `loan_events` (bounded by env limits).
    */
-  async checkOverdueLoans(loanIds?: number[]): Promise<DefaultCheckRunResult> {
-    const runId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const { signer, server, passphrase } = this.assertConfigured();
+  async checkOverdueLoans(loanIds?: number[]): Promise<DefaultCheckRunResult | null> {
+    const startTime = Date.now();
+    const jobName = 'defaultChecker';
 
-    const latest = await server.getLatestLedger();
-    const currentLedger = latest.sequence;
-
-    const stats = await this.fetchOverdueStats(currentLedger);
-
-    const explicitIds = loanIds
-      ? Array.from(
-          new Set(loanIds.filter((id) => Number.isInteger(id) && id > 0)),
-        )
-      : undefined;
-
-    const targetIds =
-      explicitIds && explicitIds.length > 0
-        ? explicitIds
-        : await this.fetchOverdueLoanIds(currentLedger);
-
-    logger.info("default_check.run.start", {
-      runId,
-      currentLedger,
-      termLedgers: this.termLedgers,
-      batchSize: this.batchSize,
-      maxLoansPerRun: this.maxLoansPerRun,
-      overdueCount: stats.overdueCount,
-      oldestDueLedger: stats.oldestDueLedger,
-      ledgersPastOldestDue: stats.ledgersPastOldestDue,
-      explicitLoanCount: explicitIds?.length ?? 0,
-      targetLoanCount: targetIds.length,
-    });
-
-    const batches: DefaultCheckBatchResult[] = [];
-    for (const batch of chunk(targetIds, this.batchSize)) {
-      if (!batch.length) continue;
-      const result = await this.submitCheckDefaults(
-        server,
-        signer,
-        passphrase,
-        batch,
-      );
-      batches.push(result);
-
-      logger.info("default_check.batch", {
-        runId,
-        loanIds: result.loanIds,
-        txHash: result.txHash,
-        submitStatus: result.submitStatus,
-        txStatus: result.txStatus,
-        error: result.error,
-      });
+    // Try to acquire distributed lock to prevent overlapping runs
+    const lockAcquired = await this.acquireLock();
+    if (!lockAcquired) {
+      logger
+        .withContext()
+        .warn('Default checker run skipped - another instance is already running');
+      return null;
     }
 
-    logger.info("default_check.run.complete", {
-      runId,
-      batches: batches.length,
-      currentLedger,
-      overdueCount: stats.overdueCount,
-      oldestDueLedger: stats.oldestDueLedger,
-      ledgersPastOldestDue: stats.ledgersPastOldestDue,
-    });
+    try {
+      const runId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const { signer, server, passphrase } = this.assertConfigured();
+
+      if (await this.hasSuspectLedgerRanges()) {
+        logger.withContext().warn('default_check.run.skipped_suspect_ledger_range', {
+          runId,
+          contractId: this.contractId,
+        });
+
+        const durationMs = Date.now() - startTime;
+        jobMetricsService.recordSuccess(jobName, durationMs);
+
+        return {
+          runId,
+          currentLedger: 0,
+          termLedgers: this.termLedgers,
+          overdueCount: 0,
+          loansChecked: 0,
+          successfulSubmissions: 0,
+          failedSubmissions: 0,
+          batches: [],
+          skipped: true,
+          skippedReason: 'unresolved_ledger_gap',
+        };
+      }
+
+      const latest = await server.getLatestLedger();
+      const currentLedger = latest.sequence;
+
+      await backfillExtensionDueLedgers();
+
+      const stats = await this.fetchOverdueStats(currentLedger);
+
+      const explicitIds = loanIds
+        ? Array.from(new Set(loanIds.filter((id) => Number.isInteger(id) && id > 0)))
+        : undefined;
+
+      const targetIds =
+        explicitIds && explicitIds.length > 0
+          ? explicitIds
+          : await this.fetchOverdueLoanIds(currentLedger);
+
+      logger.withContext().info('default_check.run.start', {
+        runId,
+        currentLedger,
+        termLedgers: this.termLedgers,
+        batchSize: this.batchSize,
+        batchTimeoutMs: this.batchTimeoutMs,
+        maxLoansPerRun: this.maxLoansPerRun,
+        overdueCount: stats.overdueCount,
+        oldestDueLedger: stats.oldestDueLedger,
+        ledgersPastOldestDue: stats.ledgersPastOldestDue,
+        explicitLoanCount: explicitIds?.length ?? 0,
+        targetLoanCount: targetIds.length,
+      });
+
+      const allChunks = chunk(targetIds, this.batchSize).filter((b) => b.length > 0);
+
+      // Fetch the admin account once and assign strictly increasing sequence
+      // numbers so concurrent batches never collide on txBAD_SEQ (issue #1094).
+      const adminAccount = await server.getAccount(signer.publicKey());
+      const baseSequence = BigInt(adminAccount.sequenceNumber());
+      const batchAccounts = allChunks.map(
+        (_, i) => new Account(signer.publicKey(), String(baseSequence + BigInt(i + 1))),
+      );
+
+      const batchResults = await mapConcurrent(
+        allChunks.map((batch, i) => ({ batch, account: batchAccounts[i]! })),
+        this.concurrency,
+        async ({ batch, account: batchAccount }) => {
+          const result = await this.submitCheckDefaultsWithTimeout(
+            server,
+            signer,
+            passphrase,
+            batch,
+            batchAccount,
+          );
+
+          logger.withContext().info('default_check.batch', {
+            runId,
+            loanIds: result.loanIds,
+            txHash: result.txHash,
+            submitStatus: result.submitStatus,
+            txStatus: result.txStatus,
+            error: result.error,
+            timedOut: result.timedOut,
+          });
+
+          return result;
+        },
+      );
+
+      const loansChecked = targetIds.length;
+      const successfulSubmissions = batchResults.filter((b) => !b.error && b.txHash).length;
+      const failedSubmissions = batchResults.filter((b) => b.error || !b.txHash).length;
+
+      logger.withContext().info('default_check.run.complete', {
+        runId,
+        batches: batchResults.length,
+        loansChecked,
+        successfulSubmissions,
+        failedSubmissions,
+        currentLedger,
+        overdueCount: stats.overdueCount,
+        oldestDueLedger: stats.oldestDueLedger,
+        ledgersPastOldestDue: stats.ledgersPastOldestDue,
+      });
+
+      // Record success metrics
+      const durationMs = Date.now() - startTime;
+      jobMetricsService.recordSuccess(jobName, durationMs);
+
+      return {
+        runId,
+        currentLedger,
+        termLedgers: this.termLedgers,
+        overdueCount: stats.overdueCount,
+        loansChecked,
+        successfulSubmissions,
+        failedSubmissions,
+        ...(stats.oldestDueLedger !== undefined ? { oldestDueLedger: stats.oldestDueLedger } : {}),
+        ...(stats.ledgersPastOldestDue !== undefined
+          ? { ledgersPastOldestDue: stats.ledgersPastOldestDue }
+          : {}),
+        batches: batchResults,
+      };
+    } catch (error) {
+      // Record failure metrics
+      const durationMs = Date.now() - startTime;
+      jobMetricsService.recordFailure(jobName, error as Error | string, durationMs);
+      throw error;
+    } finally {
+      // Always release the lock, even if the run failed
+      await this.releaseLock();
+    }
+  }
+
+  /**
+   * Submits `reverse_default(loan_id)` to the LoanManager contract (#1803).
+   *
+   * The on-chain counterpart of `check_defaults`, signed with the same
+   * `LOAN_MANAGER_ADMIN_SECRET` key the checker already uses, and the only way
+   * a disputed default stops being a database-only fiction:
+   * `adminDisputeController.resolveLoanDispute('reverse')` calls this and
+   * refuses to record the resolution unless it comes back with a tx hash.
+   *
+   * Unlike `checkOverdueLoans` this takes no distributed lock and is not
+   * batched — it runs inside an admin HTTP request, for a single loan, and the
+   * caller reports the outcome to an operator who must see the failure rather
+   * than a best-effort batch summary.
+   *
+   * A returned `error` means nothing reached the ledger. The caller must not
+   * treat the reversal as done in that case; the dispute stays open in the
+   * database so it can be retried.
+   */
+  async reverseDefault(loanId: number): Promise<{
+    loanId: number;
+    txHash?: string;
+    ledger?: number;
+    submitStatus?: string;
+    txStatus?: string;
+    error?: string;
+  }> {
+    const { signer, server, passphrase } = this.assertConfigured();
+
+    const tx = new TransactionBuilder(await server.getAccount(signer.publicKey()), {
+      fee: BASE_FEE,
+      networkPassphrase: passphrase,
+    })
+      .addOperation(
+        Operation.invokeContractFunction({
+          contract: this.contractId,
+          function: 'reverse_default',
+          args: [nativeToScVal(loanId, { type: 'u32' })],
+        }),
+      )
+      .setTimeout(30)
+      .build();
+
+    let prepared;
+    try {
+      prepared = await server.prepareTransaction(tx);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { loanId, error: `prepareTransaction failed: ${message}` };
+    }
+
+    prepared.sign(signer);
+
+    let send;
+    try {
+      send = await server.sendTransaction(prepared);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { loanId, error: `sendTransaction failed: ${message}` };
+    }
+
+    const txHash = send.hash;
+    if (!txHash) {
+      return {
+        loanId,
+        ...(send.status !== undefined ? { submitStatus: send.status } : {}),
+        error: 'sendTransaction returned no hash',
+      };
+    }
+
+    let txStatus: string | undefined;
+    let ledger: number | undefined;
+    try {
+      const polled = await server.pollTransaction(txHash, {
+        attempts: this.pollAttempts,
+        sleepStrategy: (_attempt: number) => this.pollSleepMs,
+      });
+      txStatus = polled.status;
+      const polledLedger = (polled as { ledger?: unknown }).ledger;
+      if (typeof polledLedger === 'number') {
+        ledger = polledLedger;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.withContext().warn('Default reversal transaction polling failed', {
+        loanId,
+        txHash,
+        message,
+      });
+      // Submitted but unconfirmed: the reversal may or may not have landed, so
+      // it is reported as an error with the hash for the operator to check. The
+      // database must never claim a reversal the ledger has not confirmed.
+      return {
+        loanId,
+        txHash,
+        error: `could not confirm reverse_default on-chain (tx ${txHash}): ${message}`,
+      };
+    }
+
+    // A submitted-but-not-confirmed transaction is not a reversal: the ledger
+    // may still reject it (e.g. LoanNotDefaulted, InsufficientPoolLiquidity).
+    // Only SUCCESS is reported as a usable hash so the caller never records a
+    // resolution that did not land.
+    if (txStatus !== 'SUCCESS') {
+      return {
+        loanId,
+        txHash,
+        ...(txStatus !== undefined ? { txStatus } : {}),
+        error: `reverse_default did not succeed on-chain (status: ${txStatus ?? 'unknown'})`,
+      };
+    }
 
     return {
-      runId,
-      currentLedger,
-      termLedgers: this.termLedgers,
-      overdueCount: stats.overdueCount,
-      ...(stats.oldestDueLedger !== undefined
-        ? { oldestDueLedger: stats.oldestDueLedger }
-        : {}),
-      ...(stats.ledgersPastOldestDue !== undefined
-        ? { ledgersPastOldestDue: stats.ledgersPastOldestDue }
-        : {}),
-      batches,
+      loanId,
+      txHash,
+      ...(ledger !== undefined ? { ledger } : {}),
+      ...(send.status !== undefined ? { submitStatus: send.status } : {}),
+      txStatus,
     };
   }
 }
@@ -393,24 +836,20 @@ let inFlight = false;
 export function startDefaultCheckerScheduler(): void {
   if (interval) return;
 
-  if (process.env.NODE_ENV === "test") {
+  if (process.env.NODE_ENV === 'test') {
     return;
   }
 
-  if (
-    !process.env.LOAN_MANAGER_CONTRACT_ID ||
-    !process.env.LOAN_MANAGER_ADMIN_SECRET
-  ) {
-    logger.warn(
-      "Default checker scheduler disabled (set LOAN_MANAGER_CONTRACT_ID and LOAN_MANAGER_ADMIN_SECRET)",
-    );
+  if (!process.env.LOAN_MANAGER_CONTRACT_ID || !process.env.LOAN_MANAGER_ADMIN_SECRET) {
+    logger
+      .withContext()
+      .warn(
+        'Default checker scheduler disabled (set LOAN_MANAGER_CONTRACT_ID and LOAN_MANAGER_ADMIN_SECRET)',
+      );
     return;
   }
 
-  const intervalMs = parsePositiveInt(
-    process.env.DEFAULT_CHECK_INTERVAL_MS,
-    30 * 60 * 1000,
-  );
+  const intervalMs = parsePositiveInt(process.env.DEFAULT_CHECK_INTERVAL_MS, 30 * 60 * 1000);
 
   interval = setInterval(() => {
     void (async () => {
@@ -419,18 +858,18 @@ export function startDefaultCheckerScheduler(): void {
       try {
         await defaultChecker.checkOverdueLoans();
       } catch (error) {
-        logger.error("Default checker scheduled run failed", { error });
+        logger.withContext().error('Default checker scheduled run failed', { error });
       } finally {
         inFlight = false;
       }
     })();
   }, intervalMs);
 
-  logger.info("Default checker scheduler started", { intervalMs });
+  logger.withContext().info('Default checker scheduler started', { intervalMs });
 }
 
 export function stopDefaultCheckerScheduler(): void {
   if (interval) clearInterval(interval);
   interval = undefined;
-  logger.info("Default checker scheduler stopped");
+  logger.withContext().info('Default checker scheduler stopped');
 }

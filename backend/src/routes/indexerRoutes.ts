@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router } from 'express';
 import {
   getIndexerStatus,
   getBorrowerEvents,
@@ -7,14 +7,12 @@ import {
   listWebhookSubscriptions,
   createWebhookSubscription,
   deleteWebhookSubscription,
-} from "../controllers/indexerController.js";
-import { requireApiKey } from "../middleware/auth.js";
-import {
-  requireJwtAuth,
-  requireScopes,
-  requireWalletOwnership,
-} from "../middleware/jwtAuth.js";
-import { requireLoanBorrowerAccess } from "../middleware/loanAccess.js";
+} from '../controllers/indexerController.js';
+import { requireApiKey } from '../middleware/auth.js';
+import { requireJwtAuth, requireScopes, requireWalletOwnership } from '../middleware/jwtAuth.js';
+import { requireLoanBorrowerAccess } from '../middleware/loanAccess.js';
+import { strictRateLimiter } from '../middleware/rateLimiter.js';
+import { auditLog } from '../middleware/auditLog.js';
 
 const router = Router();
 
@@ -31,26 +29,9 @@ const router = Router();
  *         content:
  *           application/json:
  *             schema:
- *               type: object
- *               properties:
- *                 success:
- *                   type: boolean
- *                 data:
- *                   type: object
- *                   properties:
- *                     lastIndexedLedger:
- *                       type: integer
- *                     lastIndexedCursor:
- *                       type: string
- *                     lastUpdated:
- *                       type: string
- *                       format: date-time
- *                     totalEvents:
- *                       type: integer
- *                     eventsByType:
- *                       type: object
+ *               $ref: '#/components/schemas/IndexerStatusResponse'
  */
-router.get("/status", getIndexerStatus);
+router.get('/status', getIndexerStatus);
 
 /**
  * @swagger
@@ -83,15 +64,19 @@ router.get("/status", getIndexerStatus);
  *     responses:
  *       200:
  *         description: Events retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/BorrowerEventsResponse'
  *       401:
  *         description: Missing or invalid Bearer token
  *       403:
  *         description: borrower does not match authenticated wallet
  */
 router.get(
-  "/events/borrower/:borrower",
+  '/events/borrower/:borrower',
   requireJwtAuth,
-  requireScopes("read:loans"),
+  requireScopes('read:loans'),
   requireWalletOwnership,
   getBorrowerEvents,
 );
@@ -116,15 +101,19 @@ router.get(
  *     responses:
  *       200:
  *         description: Events retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/LoanEventsResponse'
  *       401:
  *         description: Missing or invalid Bearer token
  *       404:
  *         description: Loan not found or not accessible
  */
 router.get(
-  "/events/loan/:loanId",
+  '/events/loan/:loanId',
   requireJwtAuth,
-  requireScopes("read:loans"),
+  requireScopes('read:loans'),
   requireLoanBorrowerAccess,
   getLoanEvents,
 );
@@ -135,8 +124,8 @@ router.get(
  *   get:
  *     summary: Get recent events
  *     description: >
- *       Internal/admin use: requires `x-api-key` (`INTERNAL_API_KEY`). Returns the
- *       most recent loan events, optionally filtered by event type.
+ *       Internal/admin use: requires an `admin:indexer` scoped `x-api-key`.
+ *       Returns the most recent loan events, optionally filtered by event type.
  *     tags: [Indexer]
  *     security:
  *       - ApiKeyAuth: []
@@ -145,7 +134,7 @@ router.get(
  *         name: limit
  *         schema:
  *           type: integer
- *           default: 20
+ *           default: 50
  *       - in: query
  *         name: eventType
  *         schema:
@@ -154,10 +143,14 @@ router.get(
  *     responses:
  *       200:
  *         description: Events retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/RecentEventsResponse'
  *       401:
  *         description: Missing or invalid API key
  */
-router.get("/events/recent", requireApiKey, getRecentEvents);
+router.get('/events/recent', requireApiKey('admin:indexer'), getRecentEvents);
 
 /**
  * @swagger
@@ -170,8 +163,18 @@ router.get("/events/recent", requireApiKey, getRecentEvents);
  *     responses:
  *       200:
  *         description: Webhook subscriptions retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/WebhookSubscriptionListResponse'
  *       401:
  *         description: Missing or invalid API key
+ */
+router.get('/webhooks', requireApiKey('admin:webhooks'), listWebhookSubscriptions);
+
+/**
+ * @swagger
+ * /indexer/webhooks:
  *   post:
  *     summary: Register a webhook subscription
  *     tags: [Indexer]
@@ -197,11 +200,20 @@ router.get("/events/recent", requireApiKey, getRecentEvents);
  *     responses:
  *       201:
  *         description: Webhook subscription created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/WebhookSubscriptionResponse'
  *       401:
  *         description: Missing or invalid API key
  */
-router.get("/webhooks", requireApiKey, listWebhookSubscriptions);
-router.post("/webhooks", requireApiKey, createWebhookSubscription);
+router.post(
+  '/webhooks',
+  requireApiKey('admin:webhooks'),
+  strictRateLimiter,
+  auditLog,
+  createWebhookSubscription,
+);
 
 /**
  * @swagger
@@ -220,12 +232,18 @@ router.post("/webhooks", requireApiKey, createWebhookSubscription);
  *     responses:
  *       200:
  *         description: Webhook subscription deleted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SuccessMessageResponse'
  *       401:
  *         description: Missing or invalid API key
  */
 router.delete(
-  "/webhooks/:subscriptionId",
-  requireApiKey,
+  '/webhooks/:subscriptionId',
+  requireApiKey('admin:webhooks'),
+  strictRateLimiter,
+  auditLog,
   deleteWebhookSubscription,
 );
 

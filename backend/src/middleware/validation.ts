@@ -1,18 +1,13 @@
-import type { Request, Response, NextFunction } from "express";
-import { z, type ZodSchema, type ZodType } from "zod";
+import type { Request, Response, NextFunction } from 'express';
+import { z, type ZodSchema, type ZodType } from 'zod';
 
-type ValidationSource = "body" | "query" | "params";
+type ValidationSource = 'body' | 'query' | 'params';
 
 const validateSource = (schema: ZodType, source: ValidationSource) => {
   return (req: Request, _res: Response, next: NextFunction) => {
     try {
-      const data =
-        source === "body"
-          ? req.body
-          : source === "query"
-            ? req.query
-            : req.params;
-      req[source] = schema.parse(data);
+      const data = source === 'body' ? req.body : source === 'query' ? req.query : req.params;
+      schema.parse(data);
       next();
     } catch (error) {
       next(error);
@@ -20,11 +15,9 @@ const validateSource = (schema: ZodType, source: ValidationSource) => {
   };
 };
 
-export const validateBody = (schema: ZodType) => validateSource(schema, "body");
-export const validateQuery = (schema: ZodType) =>
-  validateSource(schema, "query");
-export const validateParams = (schema: ZodType) =>
-  validateSource(schema, "params");
+export const validateBody = (schema: ZodType) => validateSource(schema, 'body');
+export const validateQuery = (schema: ZodType) => validateSource(schema, 'query');
+export const validateParams = (schema: ZodType) => validateSource(schema, 'params');
 
 export const validate = (schema: ZodSchema) => {
   return (req: Request, _res: Response, next: NextFunction) => {

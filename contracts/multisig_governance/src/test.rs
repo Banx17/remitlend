@@ -1,17 +1,74 @@
 use super::*;
+use soroban_sdk::testutils::storage::Instance as _;
 use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
-use soroban_sdk::{Address, Env, Vec};
+use soroban_sdk::{Address, BytesN, Env, Vec};
 #[allow(deprecated)]
-fn setup() -> (Env, GovernanceContractClient<'static>, Address, Address) {
+#[contract]
+pub struct MockTarget;
+
+#[contractimpl]
+impl MockTarget {
+    pub fn propose_admin(env: Env, new_admin: Address) {
+        env.storage()
+            .instance()
+            .set(&symbol_short!("pending"), &new_admin);
+    }
+    pub fn has_pending_transfer(env: Env) -> bool {
+        if let Some(pending) = env
+            .storage()
+            .instance()
+            .get::<Symbol, PendingTransfer>(&KEY_PENDING)
+        {
+            pending.status == ProposalStatus::Active
+        } else {
+            false
+        }
+    }
+    pub fn accept_admin(env: Env) {
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("pending"))
+            .unwrap();
+        pending.require_auth();
+        env.storage()
+            .instance()
+            .set(&symbol_short!("admin"), &pending);
+    }
+    pub fn get_admin(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .unwrap()
+    }
+    pub fn get_pending_admin(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("pending"))
+            .unwrap()
+    }
+}
+
+fn setup() -> (
+    Env,
+    GovernanceContractClient<'static>,
+    Address,
+    Vec<Address>,
+) {
     let env = Env::default();
     env.mock_all_auths();
-    let id = env.register_contract(None, GovernanceContract);
-    // let id = env.register
+    let id = env.register(GovernanceContract, ());
     let client = GovernanceContractClient::new(&env, &id);
     let admin = Address::generate(&env);
-    let target = Address::generate(&env);
-    client.initialize(&admin, &target);
-    (env, client, admin, target)
+
+    let targets = soroban_sdk::vec![
+        &env,
+        env.register(MockTarget, ()),
+        env.register(MockTarget, ())
+    ];
+
+    client.initialize(&admin, &targets);
+    (env, client, admin, targets)
 }
 
 fn set_ts(env: &Env, ts: u64) {
@@ -27,6 +84,53 @@ fn set_ts(env: &Env, ts: u64) {
     });
 }
 
+fn create_upgrade_hash(env: &Env) -> BytesN<32> {
+    BytesN::from_array(env, &[11u8; 32])
+}
+
+#[test]
+fn version_is_initialized() {
+    let (_env, client, _admin, _) = setup();
+    assert_eq!(client.version(), 1);
+}
+
+#[test]
+#[should_panic]
+fn upgrade_requires_admin_auth() {
+    let (env, client, _admin, _) = setup();
+    env.mock_auths(&[]);
+    client.upgrade(&create_upgrade_hash(&env));
+}
+
+#[test]
+fn finalize_succeeds_and_updates_local_and_remote_state() {
+    let (env, client, admin, targets) = setup();
+    let proposed = Address::generate(&env);
+    let s = Address::generate(&env);
+    let signers = Vec::from_slice(&env, core::slice::from_ref(&s));
+
+    set_ts(&env, 1000);
+    client.propose_admin_transfer(&proposed, &signers, &1, &MIN_TIMELOCK_SECONDS);
+    client.approve_transfer(&s);
+
+    set_ts(&env, 1000 + MIN_TIMELOCK_SECONDS + 1);
+
+    // Call finalize
+    client.finalize_admin_transfer(&admin);
+
+    // 1. Local state updated
+    assert_eq!(client.get_current_admin(), proposed);
+    assert!(!client.has_pending_transfer());
+
+    // 2. Remote state updated: new admin proposed on every target
+    for target in targets.iter() {
+        assert_eq!(
+            MockTargetClient::new(&env, &target).get_pending_admin(),
+            proposed
+        );
+    }
+}
+
 #[test]
 fn initialize_sets_admin() {
     let (_env, client, admin, _) = setup();
@@ -34,10 +138,66 @@ fn initialize_sets_admin() {
 }
 
 #[test]
-#[should_panic(expected = "already initialized")]
+fn exposes_target_pending_admin_and_approval_queries() {
+    let (env, client, admin, targets) = setup();
+    let proposed = Address::generate(&env);
+    let signer = Address::generate(&env);
+    let signers = Vec::from_slice(&env, core::slice::from_ref(&signer));
+
+    assert_eq!(client.get_admin(), admin);
+    assert_eq!(client.get_targets(), targets);
+    assert!(client.get_pending().is_none());
+
+    set_ts(&env, 1000);
+    client.propose_admin_transfer(&proposed, &signers, &1, &MIN_TIMELOCK_SECONDS);
+    client.approve_transfer(&signer);
+
+    let pending = client.get_pending().expect("pending transfer");
+    assert_eq!(pending.proposed_admin, proposed);
+    assert_eq!(client.get_approval_count(), 1);
+}
+
+#[test]
 fn double_initialize_panics() {
     let (env, client, _, _) = setup();
-    client.initialize(&Address::generate(&env), &Address::generate(&env));
+    let targets = soroban_sdk::vec![&env, Address::generate(&env)];
+    let result = client.try_initialize(&Address::generate(&env), &targets);
+    assert_eq!(result, Err(Ok(GovernanceError::AlreadyInitialized)));
+}
+
+#[test]
+fn accept_target_admins_makes_governance_admin_of_every_target() {
+    let (env, client, _, targets) = setup();
+    for target in targets.iter() {
+        MockTargetClient::new(&env, &target).propose_admin(&client.address);
+    }
+
+    client.accept_target_admins();
+
+    for target in targets.iter() {
+        assert_eq!(
+            MockTargetClient::new(&env, &target).get_admin(),
+            client.address
+        );
+    }
+}
+
+#[test]
+fn initialize_rejects_empty_targets() {
+    let env = Env::default();
+    let client = GovernanceContractClient::new(&env, &env.register(GovernanceContract, ()));
+    let result = client.try_initialize(&Address::generate(&env), &Vec::new(&env));
+    assert_eq!(result, Err(Ok(GovernanceError::TargetNotSet)));
+}
+
+#[test]
+fn get_targets_falls_back_to_legacy_single_target() {
+    let env = Env::default();
+    let id = env.register(GovernanceContract, ());
+    let legacy = Address::generate(&env);
+    env.as_contract(&id, || env.storage().instance().set(&KEY_TARGET, &legacy));
+    let client = GovernanceContractClient::new(&env, &id);
+    assert_eq!(client.get_targets(), soroban_sdk::vec![&env, legacy]);
 }
 
 #[test]
@@ -56,28 +216,30 @@ fn propose_creates_pending_transfer() {
 }
 
 #[test]
-#[should_panic(expected = "delay must be >= 86400")]
 fn propose_rejects_short_delay() {
     let (env, client, _, _) = setup();
     let signers = Vec::from_slice(&env, &[Address::generate(&env)]);
-    client.propose_admin_transfer(&Address::generate(&env), &signers, &1, &3600);
+    let result = client.try_propose_admin_transfer(&Address::generate(&env), &signers, &1, &3600);
+    assert_eq!(result, Err(Ok(GovernanceError::DelayTooShort)));
 }
 
 #[test]
-#[should_panic(expected = "threshold exceeds signer count")]
 fn propose_rejects_threshold_exceeding_signers() {
     let (env, client, _, _) = setup();
     let signers = Vec::from_slice(&env, &[Address::generate(&env)]);
-    client.propose_admin_transfer(
+    let result = client.try_propose_admin_transfer(
         &Address::generate(&env),
         &signers,
         &2,
         &MIN_TIMELOCK_SECONDS,
     );
+    assert_eq!(
+        result,
+        Err(Ok(GovernanceError::ThresholdExceedsSignerCount))
+    );
 }
 
 #[test]
-#[should_panic(expected = "transfer already pending")]
 fn propose_rejects_duplicate() {
     let (env, client, _, _) = setup();
     let signers = Vec::from_slice(&env, &[Address::generate(&env)]);
@@ -87,12 +249,29 @@ fn propose_rejects_duplicate() {
         &1,
         &MIN_TIMELOCK_SECONDS,
     );
-    client.propose_admin_transfer(
+    let result = client.try_propose_admin_transfer(
         &Address::generate(&env),
         &signers,
         &1,
         &MIN_TIMELOCK_SECONDS,
     );
+    assert_eq!(result, Err(Ok(GovernanceError::TransferAlreadyPending)));
+}
+
+#[test]
+fn propose_rejects_duplicate_signer_address() {
+    let (env, client, _, _) = setup();
+    let s = Address::generate(&env);
+    // Duplicate the same address in the signer list
+    let signers = Vec::from_slice(&env, &[s.clone(), s.clone()]);
+    set_ts(&env, 1000);
+    let result = client.try_propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &2,
+        &MIN_TIMELOCK_SECONDS,
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::DuplicateSigner)));
 }
 
 #[test]
@@ -131,7 +310,6 @@ fn approve_is_idempotent() {
 }
 
 #[test]
-#[should_panic(expected = "caller is not in the signer list")]
 fn approve_rejects_non_signer() {
     let (env, client, _, _) = setup();
     let s = Address::generate(&env);
@@ -142,12 +320,11 @@ fn approve_rejects_non_signer() {
         &1,
         &MIN_TIMELOCK_SECONDS,
     );
-    client.approve_transfer(&Address::generate(&env));
+    let result = client.try_approve_transfer(&Address::generate(&env));
+    assert_eq!(result, Err(Ok(GovernanceError::SignerNotAllowed)));
 }
 
 #[test]
-//#[should_panic(expected = "timelock not elapsed")]
-#[should_panic(expected = "timelock not elapsed")]
 fn finalize_before_timelock_panics() {
     let (env, client, _, _) = setup();
     let s = Address::generate(&env);
@@ -161,12 +338,11 @@ fn finalize_before_timelock_panics() {
     );
     client.approve_transfer(&s);
     set_ts(&env, 1000 + MIN_TIMELOCK_SECONDS - 1);
-    client.finalize_admin_transfer(&Address::generate(&env));
+    let result = client.try_finalize_admin_transfer(&Address::generate(&env));
+    assert_eq!(result, Err(Ok(GovernanceError::TimelockNotElapsed)));
 }
 
 #[test]
-//#[should_panic(expected = "threshold not met")]
-#[should_panic(expected = "threshold not met")]
 fn finalize_without_enough_approvals_panics() {
     let (env, client, _, _) = setup();
     let s1 = Address::generate(&env);
@@ -181,7 +357,8 @@ fn finalize_without_enough_approvals_panics() {
     );
     client.approve_transfer(&s1); // only 1 of 2
     set_ts(&env, 1000 + MIN_TIMELOCK_SECONDS + 1);
-    client.finalize_admin_transfer(&Address::generate(&env));
+    let result = client.try_finalize_admin_transfer(&Address::generate(&env));
+    assert_eq!(result, Err(Ok(GovernanceError::ThresholdNotMet)));
 }
 
 #[test]
@@ -250,7 +427,6 @@ fn cancel_clears_pending() {
 }
 
 #[test]
-#[should_panic(expected = "must wait at least 3600 seconds after cancellation before re-proposing")]
 fn cancel_enforces_reproposal_cooldown() {
     let (env, client, _, _) = setup();
     let s = Address::generate(&env);
@@ -265,12 +441,13 @@ fn cancel_enforces_reproposal_cooldown() {
     );
     client.cancel_admin_transfer();
 
-    client.propose_admin_transfer(
+    let result = client.try_propose_admin_transfer(
         &Address::generate(&env),
         &signers,
         &1,
         &MIN_TIMELOCK_SECONDS,
     );
+    assert_eq!(result, Err(Ok(GovernanceError::ReproposalCooldownActive)));
 }
 
 #[test]
@@ -299,9 +476,673 @@ fn cancel_allows_reproposal_after_cooldown() {
 }
 
 #[test]
-#[should_panic(expected = "no pending transfer to cancel")]
 fn cancel_with_no_pending_panics() {
     let (_env, client, _, _) = setup();
-    client.cancel_admin_transfer();
+    let result = client.try_cancel_admin_transfer();
+    assert_eq!(result, Err(Ok(GovernanceError::NoPendingTransfer)));
 }
-// }
+
+#[test]
+fn expire_proposal_works_after_ttl() {
+    let (env, client, _admin, _) = setup();
+    let proposed = Address::generate(&env);
+    let s = Address::generate(&env);
+    let signers = Vec::from_slice(&env, core::slice::from_ref(&s));
+
+    // Create proposal
+    set_ts(&env, 1000);
+    client.propose_admin_transfer(&proposed, &signers, &1, &MIN_TIMELOCK_SECONDS);
+    assert!(client.has_pending_transfer());
+
+    // Move past TTL
+    set_ts(&env, 1000 + PROPOSAL_TTL_SECONDS + 1);
+
+    // Anyone can expire the proposal
+    let caller = Address::generate(&env);
+    client.expire_proposal(&caller);
+
+    // Proposal should be gone
+    assert!(!client.has_pending_transfer());
+}
+
+#[test]
+fn expire_proposal_fails_before_ttl() {
+    let (env, client, _, _) = setup();
+    let proposed = Address::generate(&env);
+    let s = Address::generate(&env);
+    let signers = Vec::from_slice(&env, core::slice::from_ref(&s));
+
+    // Create proposal
+    set_ts(&env, 1000);
+    client.propose_admin_transfer(&proposed, &signers, &1, &MIN_TIMELOCK_SECONDS);
+
+    // Try to expire before TTL
+    set_ts(&env, 1000 + PROPOSAL_TTL_SECONDS - 1);
+    let result = client.try_expire_proposal(&Address::generate(&env));
+    assert_eq!(result, Err(Ok(GovernanceError::ProposalNotExpired)));
+}
+
+#[test]
+fn expire_proposal_fails_with_no_pending() {
+    let (env, client, _, _) = setup();
+    let result = client.try_expire_proposal(&Address::generate(&env));
+    assert_eq!(result, Err(Ok(GovernanceError::NoPendingTransfer)));
+}
+
+#[test]
+fn finalize_fails_after_expiry() {
+    let (env, client, admin, _) = setup();
+    let proposed = Address::generate(&env);
+    let s = Address::generate(&env);
+    let signers = Vec::from_slice(&env, core::slice::from_ref(&s));
+
+    // Create proposal
+    set_ts(&env, 1000);
+    client.propose_admin_transfer(&proposed, &signers, &1, &MIN_TIMELOCK_SECONDS);
+    client.approve_transfer(&s);
+
+    // Move past both timelock and TTL
+    set_ts(&env, 1000 + MIN_TIMELOCK_SECONDS + PROPOSAL_TTL_SECONDS + 1);
+
+    // Finalization should fail due to expiry
+    let result = client.try_finalize_admin_transfer(&admin);
+    assert_eq!(result, Err(Ok(GovernanceError::ProposalExpired)));
+}
+
+#[test]
+fn finalize_works_within_ttl() {
+    let (env, client, admin, _) = setup();
+    let proposed = Address::generate(&env);
+    let s = Address::generate(&env);
+    let signers = Vec::from_slice(&env, core::slice::from_ref(&s));
+
+    // Create proposal
+    set_ts(&env, 1000);
+    client.propose_admin_transfer(&proposed, &signers, &1, &MIN_TIMELOCK_SECONDS);
+    client.approve_transfer(&s);
+
+    // Move past timelock but within TTL
+    set_ts(&env, 1000 + MIN_TIMELOCK_SECONDS + 1);
+
+    // Finalization should succeed
+    client.finalize_admin_transfer(&admin);
+    assert_eq!(client.get_current_admin(), proposed);
+    assert!(!client.has_pending_transfer());
+}
+
+#[test]
+fn new_proposal_allowed_after_expiry() {
+    let (env, client, _admin, _) = setup();
+    let proposed1 = Address::generate(&env);
+    let proposed2 = Address::generate(&env);
+    let s = Address::generate(&env);
+    let signers = Vec::from_slice(&env, core::slice::from_ref(&s));
+
+    // Create first proposal
+    set_ts(&env, 1000);
+    client.propose_admin_transfer(&proposed1, &signers, &1, &MIN_TIMELOCK_SECONDS);
+
+    // Expire it
+    set_ts(&env, 1000 + PROPOSAL_TTL_SECONDS + 1);
+    client.expire_proposal(&Address::generate(&env));
+
+    // Should be able to create new proposal after cooldown (expiry triggers same cooldown as cancellation)
+    set_ts(&env, 1000 + PROPOSAL_TTL_SECONDS + 3602);
+    client.propose_admin_transfer(&proposed2, &signers, &1, &MIN_TIMELOCK_SECONDS);
+    assert!(client.has_pending_transfer());
+    let pending = client.get_pending_transfer();
+    assert_eq!(pending.proposed_admin, proposed2);
+}
+#[test]
+fn emergency_cancel_works_and_prevents_finalization() {
+    let (env, client, _admin, _) = setup();
+    let proposed = Address::generate(&env);
+    let s = Address::generate(&env);
+    let signers = Vec::from_slice(&env, core::slice::from_ref(&s));
+
+    set_ts(&env, 1000);
+    client.propose_admin_transfer(&proposed, &signers, &1, &MIN_TIMELOCK_SECONDS);
+    let proposal_id = client.get_pending_transfer().id;
+
+    // Emergency cancel
+    let reason = Some(soroban_sdk::String::from_str(&env, "Emergency"));
+    client.emergency_cancel_proposal(&proposal_id, &reason);
+
+    // Proposal should no longer be "pending" (active)
+    assert!(!client.has_pending_transfer());
+    assert_eq!(
+        client.get_pending_transfer().status,
+        ProposalStatus::Cancelled
+    );
+
+    // Finalization should panic
+    set_ts(&env, 1000 + MIN_TIMELOCK_SECONDS + 1);
+    // client.finalize_admin_transfer(&admin); // This would panic
+}
+
+#[test]
+fn cannot_approve_cancelled_proposal() {
+    let (env, client, _admin, _) = setup();
+    let s = Address::generate(&env);
+    let signers = Vec::from_slice(&env, core::slice::from_ref(&s));
+
+    client.propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &1,
+        &MIN_TIMELOCK_SECONDS,
+    );
+    let proposal_id = client.get_pending_transfer().id;
+    client.emergency_cancel_proposal(&proposal_id, &None);
+
+    let result = client.try_approve_transfer(&s);
+    assert_eq!(result, Err(Ok(GovernanceError::ProposalNotActive)));
+}
+
+#[test]
+fn cannot_finalize_cancelled_proposal() {
+    let (env, client, admin, _) = setup();
+    let s = Address::generate(&env);
+    let signers = Vec::from_slice(&env, core::slice::from_ref(&s));
+
+    set_ts(&env, 1000);
+    client.propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &1,
+        &MIN_TIMELOCK_SECONDS,
+    );
+    let proposal_id = client.get_pending_transfer().id;
+    client.approve_transfer(&s);
+
+    client.emergency_cancel_proposal(&proposal_id, &None);
+
+    set_ts(&env, 1000 + MIN_TIMELOCK_SECONDS + 1);
+    let result = client.try_finalize_admin_transfer(&admin);
+    assert_eq!(result, Err(Ok(GovernanceError::ProposalNotActive)));
+}
+
+// ── Additional coverage tests ─────────────────────────────────────────────────
+
+#[test]
+fn propose_rejects_empty_signers() {
+    let (env, client, _, _) = setup();
+    let signers: Vec<Address> = Vec::new(&env);
+    let result = client.try_propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &1,
+        &MIN_TIMELOCK_SECONDS,
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::EmptySignerList)));
+}
+
+#[test]
+fn propose_rejects_too_many_signers() {
+    let (env, client, _, _) = setup();
+    let mut addrs = soroban_sdk::vec![&env];
+    for _ in 0..21 {
+        addrs.push_back(Address::generate(&env));
+    }
+    let result = client.try_propose_admin_transfer(
+        &Address::generate(&env),
+        &addrs,
+        &1,
+        &MIN_TIMELOCK_SECONDS,
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::TooManySigners)));
+}
+
+#[test]
+fn proposal_count_increments() {
+    let (env, client, _, _) = setup();
+    assert_eq!(client.get_proposal_count(), 0);
+
+    let s1 = Address::generate(&env);
+    let signers = Vec::from_slice(&env, &[s1]);
+    client.propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &1,
+        &MIN_TIMELOCK_SECONDS,
+    );
+    assert_eq!(client.get_proposal_count(), 1);
+
+    client.cancel_admin_transfer();
+    assert_eq!(client.get_proposal_count(), 1);
+
+    set_ts(&env, 1000 + REPROPOSAL_COOLDOWN_SECONDS + 1);
+    let s2 = Address::generate(&env);
+    let signers2 = Vec::from_slice(&env, &[s2]);
+    client.propose_admin_transfer(
+        &Address::generate(&env),
+        &signers2,
+        &1,
+        &MIN_TIMELOCK_SECONDS,
+    );
+    assert_eq!(client.get_proposal_count(), 2);
+}
+
+#[test]
+fn get_signers_returns_signer_list() {
+    let (env, client, _, _) = setup();
+    let s1 = Address::generate(&env);
+    let s2 = Address::generate(&env);
+    let signers = Vec::from_slice(&env, &[s1.clone(), s2.clone()]);
+    client.propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &2,
+        &MIN_TIMELOCK_SECONDS,
+    );
+    let result = client.get_signers();
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get(0), Some(s1));
+    assert_eq!(result.get(1), Some(s2));
+}
+
+#[test]
+fn get_threshold_returns_pending_threshold() {
+    let (env, client, _, _) = setup();
+    let s = Address::generate(&env);
+    let signers = Vec::from_slice(&env, &[s]);
+    client.propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &1,
+        &MIN_TIMELOCK_SECONDS,
+    );
+    assert_eq!(client.get_threshold(), 1);
+}
+
+#[test]
+fn has_approved_tracks_approvals() {
+    let (env, client, _, _) = setup();
+    let s1 = Address::generate(&env);
+    let s2 = Address::generate(&env);
+    let signers = Vec::from_slice(&env, &[s1.clone(), s2.clone()]);
+    client.propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &2,
+        &MIN_TIMELOCK_SECONDS,
+    );
+    assert!(!client.has_approved(&s1));
+    assert!(!client.has_approved(&s2));
+
+    client.approve_transfer(&s1);
+    assert!(client.has_approved(&s1));
+    assert!(!client.has_approved(&s2));
+
+    client.approve_transfer(&s2);
+    assert!(client.has_approved(&s1));
+    assert!(client.has_approved(&s2));
+}
+
+// ── DelayTooLong / upper-bound tests ─────────────────────────────────────────
+
+#[test]
+fn propose_rejects_delay_equal_to_ttl() {
+    let (env, client, _, _) = setup();
+    let signers = Vec::from_slice(&env, &[Address::generate(&env)]);
+    let result = client.try_propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &1,
+        &PROPOSAL_TTL_SECONDS,
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::DelayTooLong)));
+}
+
+#[test]
+fn propose_rejects_delay_exceeding_ttl() {
+    let (env, client, _, _) = setup();
+    let signers = Vec::from_slice(&env, &[Address::generate(&env)]);
+    let result = client.try_propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &1,
+        &(PROPOSAL_TTL_SECONDS + 1),
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::DelayTooLong)));
+}
+
+#[test]
+fn propose_rejects_large_delay() {
+    let (env, client, _, _) = setup();
+    let signers = Vec::from_slice(&env, &[Address::generate(&env)]);
+    let result = client.try_propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &1,
+        &(7 * PROPOSAL_TTL_SECONDS),
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::DelayTooLong)));
+}
+
+#[test]
+fn propose_accepts_max_delay_and_finalize_succeeds() {
+    let (env, client, admin, _) = setup();
+    let proposed = Address::generate(&env);
+    let s = Address::generate(&env);
+    let signers = Vec::from_slice(&env, core::slice::from_ref(&s));
+
+    set_ts(&env, 1000);
+    client.propose_admin_transfer(&proposed, &signers, &1, &MAX_TIMELOCK_SECONDS);
+
+    // executable_after = 1000 + MAX_TIMELOCK_SECONDS
+    let pending = client.get_pending_transfer();
+    assert_eq!(pending.executable_after, 1000 + MAX_TIMELOCK_SECONDS);
+
+    client.approve_transfer(&s);
+
+    // Move to exactly executable_after (within TTL by construction)
+    set_ts(&env, 1000 + MAX_TIMELOCK_SECONDS);
+
+    // Finalize should succeed — the window [executable_after, expiry) is exactly 1 second
+    client.finalize_admin_transfer(&admin);
+    assert_eq!(client.get_current_admin(), proposed);
+    assert!(!client.has_pending_transfer());
+}
+
+#[test]
+fn propose_delay_one_below_ttl_accepted() {
+    let (env, client, _, _) = setup();
+    let signers = Vec::from_slice(&env, &[Address::generate(&env)]);
+    let result = client.try_propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &1,
+        &(PROPOSAL_TTL_SECONDS - 1),
+    );
+    // MAX_TIMELOCK_SECONDS == PROPOSAL_TTL_SECONDS - 1, so this should succeed
+    assert_eq!(result, Ok(Ok(())));
+}
+
+// ── Delay boundary edge-case tests ───────────────────────────────────────────
+
+#[test]
+fn propose_rejects_zero_delay() {
+    let (env, client, _, _) = setup();
+    let signers = Vec::from_slice(&env, &[Address::generate(&env)]);
+    let result = client.try_propose_admin_transfer(&Address::generate(&env), &signers, &1, &0);
+    assert_eq!(result, Err(Ok(GovernanceError::DelayTooShort)));
+}
+
+#[test]
+fn propose_rejects_delay_one_below_min() {
+    let (env, client, _, _) = setup();
+    let signers = Vec::from_slice(&env, &[Address::generate(&env)]);
+    let result = client.try_propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &1,
+        &(MIN_TIMELOCK_SECONDS - 1),
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::DelayTooShort)));
+}
+
+#[test]
+fn propose_rejects_delay_one_above_max() {
+    let (env, client, _, _) = setup();
+    let signers = Vec::from_slice(&env, &[Address::generate(&env)]);
+    let result = client.try_propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &1,
+        &(MAX_TIMELOCK_SECONDS + 1),
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::DelayTooLong)));
+}
+
+#[test]
+fn finalize_rejected_one_second_before_max_delay_executable() {
+    let (env, client, admin, _) = setup();
+    let proposed = Address::generate(&env);
+    let s = Address::generate(&env);
+    let signers = Vec::from_slice(&env, core::slice::from_ref(&s));
+
+    set_ts(&env, 1000);
+    client.propose_admin_transfer(&proposed, &signers, &1, &MAX_TIMELOCK_SECONDS);
+    client.approve_transfer(&s);
+
+    // Try to finalize one second before executable_after
+    set_ts(&env, 1000 + MAX_TIMELOCK_SECONDS - 1);
+    let result = client.try_finalize_admin_transfer(&admin);
+    assert_eq!(result, Err(Ok(GovernanceError::TimelockNotElapsed)));
+}
+
+#[test]
+fn finalize_rejected_at_expiry_with_max_delay() {
+    let (env, client, admin, _) = setup();
+    let proposed = Address::generate(&env);
+    let s = Address::generate(&env);
+    let signers = Vec::from_slice(&env, core::slice::from_ref(&s));
+
+    set_ts(&env, 1000);
+    client.propose_admin_transfer(&proposed, &signers, &1, &MAX_TIMELOCK_SECONDS);
+    client.approve_transfer(&s);
+
+    // proposed_at + PROPOSAL_TTL_SECONDS is the expiry.
+    // executable_after = proposed_at + MAX_TIMELOCK_SECONDS = proposed_at + TTL - 1.
+    // So at time proposed_at + TTL (the expiry), finalize should be rejected.
+    set_ts(&env, 1000 + PROPOSAL_TTL_SECONDS);
+    let result = client.try_finalize_admin_transfer(&admin);
+    assert_eq!(result, Err(Ok(GovernanceError::ProposalExpired)));
+}
+
+#[test]
+fn finalize_succeeds_one_second_before_expiry_with_max_delay() {
+    let (env, client, admin, _) = setup();
+    let proposed = Address::generate(&env);
+    let s = Address::generate(&env);
+    let signers = Vec::from_slice(&env, core::slice::from_ref(&s));
+
+    set_ts(&env, 1000);
+    client.propose_admin_transfer(&proposed, &signers, &1, &MAX_TIMELOCK_SECONDS);
+    client.approve_transfer(&s);
+
+    // executable_after = 1000 + TTL - 1
+    // expiry = 1000 + TTL
+    // At 1000 + TTL - 1, both conditions hold: now >= executable_after AND now < expiry
+    set_ts(&env, 1000 + PROPOSAL_TTL_SECONDS - 1);
+    client.finalize_admin_transfer(&admin);
+    assert_eq!(client.get_current_admin(), proposed);
+    assert!(!client.has_pending_transfer());
+}
+
+#[test]
+fn min_delay_executable_after_correct() {
+    let (env, client, _, _) = setup();
+    let s = Address::generate(&env);
+    let signers = Vec::from_slice(&env, core::slice::from_ref(&s));
+
+    set_ts(&env, 500);
+    client.propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &1,
+        &MIN_TIMELOCK_SECONDS,
+    );
+    let pending = client.get_pending_transfer();
+    assert_eq!(pending.executable_after, 500 + MIN_TIMELOCK_SECONDS);
+    assert_eq!(pending.proposed_at, 500);
+}
+
+#[test]
+fn max_delay_finalize_window_is_one_second() {
+    // With MAX_TIMELOCK_SECONDS = PROPOSAL_TTL_SECONDS - 1,
+    // the finalize window [executable_after, expiry) should be exactly 1 second wide.
+    // executable_after = proposed_at + TTL - 1
+    // expiry = proposed_at + TTL
+    // So only the single timestamp (proposed_at + TTL - 1) is valid for finalization.
+    let (env, client, admin, _) = setup();
+    let proposed = Address::generate(&env);
+    let s = Address::generate(&env);
+    let signers = Vec::from_slice(&env, core::slice::from_ref(&s));
+
+    set_ts(&env, 2000);
+    client.propose_admin_transfer(&proposed, &signers, &1, &MAX_TIMELOCK_SECONDS);
+    client.approve_transfer(&s);
+
+    // One second BEFORE executable_after → TimelockNotElapsed
+    set_ts(&env, 2000 + MAX_TIMELOCK_SECONDS - 1);
+    let result = client.try_finalize_admin_transfer(&admin);
+    assert_eq!(result, Err(Ok(GovernanceError::TimelockNotElapsed)));
+
+    // At executable_after → should succeed
+    set_ts(&env, 2000 + MAX_TIMELOCK_SECONDS);
+    client.finalize_admin_transfer(&admin);
+    assert_eq!(client.get_current_admin(), proposed);
+}
+#[test]
+fn test_governance_finalize_against_real_targets() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // 1. Setup real contracts matching scripts/deploy.ts:
+    // Deploy RemittanceNFT
+    let admin = Address::generate(&env);
+    let nft_id = env.register(remittance_nft::RemittanceNFT, ());
+    let nft_client = remittance_nft::RemittanceNFTClient::new(&env, &nft_id);
+    nft_client.initialize(&admin);
+
+    // Deploy LendingPool
+    let pool_id = env.register(lending_pool::LendingPool, ());
+    let pool_client = lending_pool::LendingPoolClient::new(&env, &pool_id);
+    pool_client.initialize(&admin);
+
+    // Deploy test token for LoanManager
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_id = token_contract.address();
+
+    // Deploy LoanManager
+    let manager_id = env.register(loan_manager::LoanManager, ());
+    let manager_client = loan_manager::LoanManagerClient::new(&env, &manager_id);
+    nft_client.authorize_minter(&manager_id);
+    manager_client.initialize(&nft_id, &pool_id, &token_id, &admin);
+
+    // Deploy GovernanceContract
+    let gov_id = env.register(GovernanceContract, ());
+    let gov_client = GovernanceContractClient::new(&env, &gov_id);
+
+    // Initialize Governance with the 3 real governed targets
+    let targets = soroban_sdk::vec![&env, pool_id.clone(), manager_id.clone(), nft_id.clone()];
+    gov_client.initialize(&admin, &targets);
+
+    // Verify initial admins are deployer admin
+    assert_eq!(manager_client.get_admin(), admin);
+    assert_eq!(pool_client.get_admin(), admin);
+    assert_eq!(nft_client.get_admin(), admin);
+
+    // Handover target admin roles to governance:
+    // Each target's current admin calls propose_admin(Governance)
+    pool_client.propose_admin(&gov_id);
+    manager_client.propose_admin(&gov_id);
+    nft_client.propose_admin(&gov_id);
+
+    // Governance accepts target admins
+    gov_client.accept_target_admins();
+
+    // Now Governance is the admin of all 3 targets
+    assert_eq!(manager_client.get_admin(), gov_id);
+    assert_eq!(pool_client.get_admin(), gov_id);
+    assert_eq!(nft_client.get_admin(), gov_id);
+
+    // Propose an admin transfer on Governance
+    let new_admin = Address::generate(&env);
+    let signer = Address::generate(&env);
+    let signers = soroban_sdk::vec![&env, signer.clone()];
+
+    set_ts(&env, 1000);
+    gov_client.propose_admin_transfer(&new_admin, &signers, &1, &MIN_TIMELOCK_SECONDS);
+
+    // Signer approves
+    gov_client.approve_transfer(&signer);
+
+    // Advance time past timelock
+    set_ts(&env, 1000 + MIN_TIMELOCK_SECONDS + 1);
+
+    // Finalize admin transfer: cross-invokes propose_admin(new_admin) on all 3 real targets
+    let caller = Address::generate(&env);
+    gov_client.finalize_admin_transfer(&caller);
+
+    // Verify governance local admin is updated
+    assert_eq!(gov_client.get_current_admin(), new_admin);
+
+    // Verify each target has new_admin as proposed admin
+    assert_eq!(manager_client.get_proposed_admin(), Some(new_admin.clone()));
+    assert_eq!(pool_client.get_proposed_admin(), Some(new_admin.clone()));
+    assert_eq!(nft_client.get_proposed_admin(), Some(new_admin.clone()));
+
+    // new_admin accepts admin on all 3 targets
+    manager_client.accept_admin();
+    pool_client.accept_admin();
+    nft_client.accept_admin();
+
+    // Verify new_admin is now the admin of all 3 contracts
+    assert_eq!(manager_client.get_admin(), new_admin);
+    assert_eq!(pool_client.get_admin(), new_admin);
+    assert_eq!(nft_client.get_admin(), new_admin);
+
+    // Furthermore, verify LoanManager's set_admin works directly
+    let direct_admin = Address::generate(&env);
+    manager_client.set_admin(&direct_admin);
+    assert_eq!(manager_client.get_admin(), direct_admin);
+}
+// ── Instance TTL durability (#1143) ───────────────────────────────────────────
+
+/// The contract never used to extend its instance TTL, so an idle contract
+/// could have its admin and a pending proposal archived. This test starts the
+/// instance with a tiny TTL, advances the ledger well past it, and asserts the
+/// state survives because every entrypoint/view now extends the instance.
+#[test]
+fn instance_ttl_survives_idle_proposal_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Configure the ledger *before* the contract is initialized so the
+    // instance starts with a short TTL: without the fix, it would be archived
+    // long before the idle period ends.
+    env.ledger().set_min_persistent_entry_ttl(100);
+    env.ledger().set_max_entry_ttl(10_000_000);
+    env.ledger().set_timestamp(1_000);
+    env.ledger().set_sequence_number(1_000);
+
+    let id = env.register(GovernanceContract, ());
+    let client = GovernanceContractClient::new(&env, &id);
+    let admin = Address::generate(&env);
+    let targets = soroban_sdk::vec![&env, env.register(MockTarget, ())];
+    client.initialize(&admin, &targets);
+
+    let proposed = Address::generate(&env);
+    let signer = Address::generate(&env);
+    let signers = Vec::from_slice(&env, core::slice::from_ref(&signer));
+    client.propose_admin_transfer(&proposed, &signers, &1, &MIN_TIMELOCK_SECONDS);
+
+    // The instance TTL now covers the documented bump (which itself covers the
+    // 7-day proposal TTL), and stays within the network max.
+    let ttl_after_propose = env.as_contract(&id, || env.storage().instance().get_ttl());
+    assert!(
+        ttl_after_propose >= INSTANCE_TTL_BUMP,
+        "instance TTL {ttl_after_propose} should cover INSTANCE_TTL_BUMP"
+    );
+    assert!(ttl_after_propose <= 10_000_000);
+
+    // A proposal can sit untouched for its full TTL (7 days = 120_960
+    // ledgers); advance far past the tiny initial TTL of 100 ledgers.
+    let idle_ledgers: u32 = 400_000;
+    env.ledger().set_sequence_number(1_000 + idle_ledgers);
+
+    // Admin + pending proposal survive: the instance was never archived.
+    let ttl_after_idle = env.as_contract(&id, || env.storage().instance().get_ttl());
+    assert!(
+        ttl_after_idle > 0,
+        "instance was archived during the idle period"
+    );
+    assert_eq!(client.get_current_admin(), admin);
+    assert!(client.has_pending_transfer());
+    assert_eq!(client.get_pending().unwrap().proposed_admin, proposed);
+}
+

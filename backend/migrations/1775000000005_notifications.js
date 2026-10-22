@@ -9,30 +9,30 @@ export const shorthands = undefined;
  * @returns {Promise<void> | void}
  */
 export const up = (pgm) => {
-  pgm.createTable("notifications", {
-    id: "id",
-    user_id: { type: "varchar(255)", notNull: true },
+  pgm.createTable('notifications', {
+    id: 'id',
+    user_id: { type: 'varchar(255)', notNull: true },
     type: {
-      type: "varchar(50)",
+      type: 'varchar(50)',
       notNull: true,
       comment:
-        "loan_approved | repayment_due | repayment_confirmed | loan_defaulted | score_changed",
+        'loan_approved | repayment_due | repayment_confirmed | loan_defaulted | score_changed',
     },
-    title: { type: "varchar(255)", notNull: true },
-    message: { type: "text", notNull: true },
-    loan_id: { type: "integer", notNull: false },
-    read: { type: "boolean", notNull: true, default: false },
+    title: { type: 'varchar(255)', notNull: true },
+    message: { type: 'text', notNull: true },
+    loan_id: { type: 'integer', notNull: false },
+    read: { type: 'boolean', notNull: true, default: false },
     created_at: {
-      type: "timestamp",
+      type: 'timestamp',
       notNull: true,
-      default: pgm.func("current_timestamp"),
+      default: pgm.func('current_timestamp'),
     },
   });
 
-  pgm.createIndex("notifications", "user_id");
-  pgm.createIndex("notifications", "read");
-  pgm.createIndex("notifications", ["user_id", "read"]);
-  pgm.createIndex("notifications", "created_at");
+  pgm.createIndex('notifications', 'user_id');
+  pgm.createIndex('notifications', 'read');
+  pgm.createIndex('notifications', ['user_id', 'read']);
+  pgm.createIndex('notifications', 'created_at');
 };
 
 /**
@@ -41,5 +41,5 @@ export const up = (pgm) => {
  * @returns {Promise<void> | void}
  */
 export const down = (pgm) => {
-  pgm.dropTable("notifications");
+  pgm.dropTable('notifications');
 };
