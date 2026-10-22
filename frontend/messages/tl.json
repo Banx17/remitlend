@@ -198,7 +198,12 @@
     "payNowOverdue": "Bayaran Ngayon (Lintasan)",
     "contactSupport": "Kontakin ang Support",
     "viewDetails": "Tingnan ang Mga Detalye",
-    "details": "Mga Detalye"
+    "details": "Mga Detalye",
+    "loanNumber": "Loan #{id}",
+    "liquidated": "Na-liquidate",
+    "liquidatedLabel": "Na-liquidate ang collateral",
+    "repaymentProgress": "Pag-unlad ng Pagbabayad",
+    "repaymentProgressAria": "Pag-unlad ng Pagbabayad: {percent}%"
   },
   "AdminDisputes": {
     "eyebrow": "Pagsusuri ng Admin",
