@@ -198,7 +198,12 @@
     "payNowOverdue": "Pagar ahora (Vencido)",
     "contactSupport": "Contactar soporte",
     "viewDetails": "Ver detalles",
-    "details": "Detalles"
+    "details": "Detalles",
+    "loanNumber": "Préstamo #{id}",
+    "liquidated": "Liquidado",
+    "liquidatedLabel": "La garantía fue liquidada",
+    "repaymentProgress": "Progreso de reembolso",
+    "repaymentProgressAria": "Progreso de reembolso: {percent}%"
   },
   "AdminDisputes": {
     "eyebrow": "Consola admin",

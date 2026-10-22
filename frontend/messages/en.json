@@ -198,7 +198,12 @@
     "payNowOverdue": "Pay Now (Overdue)",
     "contactSupport": "Contact Support",
     "viewDetails": "View Details",
-    "details": "Details"
+    "details": "Details",
+    "loanNumber": "Loan #{id}",
+    "liquidated": "Liquidated",
+    "liquidatedLabel": "Collateral was liquidated",
+    "repaymentProgress": "Repayment Progress",
+    "repaymentProgressAria": "Repayment progress: {percent}%"
   },
   "AdminDisputes": {
     "eyebrow": "Admin Review",
