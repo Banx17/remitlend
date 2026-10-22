@@ -44,7 +44,7 @@ interface SseConnection {
  * stream closes/aborts, which mirrors a real long-lived stream and lets the
  * tests control exact framing order.
  */
-function createConnection(signal: AbortSignal | undefined): SseConnection {
+const createConnection = (signal: AbortSignal | undefined): SseConnection => {
   const encoder = new TextEncoder();
   const queue: Uint8Array[] = [];
   let pending: ((result: { done: boolean; value?: Uint8Array }) => void) | null = null;
@@ -104,9 +104,9 @@ function createConnection(signal: AbortSignal | undefined): SseConnection {
       flush();
     },
   };
-}
+};
 
-function createSseServer() {
+const createSseServer = () => {
   const connections: SseConnection[] = [];
   const fetchMock = jest.fn((_url: string, init?: RequestInit) => {
     const connection = createConnection(init?.signal ?? undefined);
@@ -115,29 +115,30 @@ function createSseServer() {
   });
   global.fetch = fetchMock as unknown as typeof fetch;
   return { fetchMock, connections };
-}
+};
 
-function createWrapper(queryClient: QueryClient) {
-  return function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
-  };
-}
+const createWrapper = (queryClient: QueryClient) => {
+  const Wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+  );
+  return Wrapper;
+};
 
 /** Number of cache entries the hook invalidated for a given query key. */
-function invalidated(queryClient: QueryClient, queryKey: readonly unknown[]) {
+const invalidated = (queryClient: QueryClient, queryKey: readonly unknown[]) => {
   const invalidate = queryClient.invalidateQueries as jest.Mock;
   const calls = invalidate.mock.calls as Array<[{ queryKey?: readonly unknown[] }]>;
   return calls.filter(([filters]) => JSON.stringify(filters.queryKey) === JSON.stringify(queryKey))
     .length;
-}
+};
 
-function allInvalidations(queryClient: QueryClient) {
+const allInvalidations = (queryClient: QueryClient) => {
   return (queryClient.invalidateQueries as jest.Mock).mock.calls.length;
-}
+};
 
-async function flush() {
+const flush = async () => {
   await act(async () => {});
-}
+};
 
 describe("useLoanStream", () => {
   let queryClient: QueryClient;

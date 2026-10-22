@@ -29,13 +29,14 @@ import { useGamificationStore } from "../../stores/useGamificationStore";
 
 const WALLET_ADDRESS = "GBORROWER1234567890";
 
-function createWrapper(queryClient: QueryClient) {
-  return function Wrapper({ children }: { children: ReactNode }) {
-    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
-  };
-}
+const createWrapper = (queryClient: QueryClient) => {
+  const Wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+  );
+  return Wrapper;
+};
 
-function setActiveSession() {
+const setActiveSession = () => {
   useUserStore.setState({
     user: {
       id: "u1",
@@ -54,13 +55,13 @@ function setActiveSession() {
     isSupported: true,
   });
   useGamificationStore.getState().addXP(50, "session test");
-}
+};
 
-function dispatchSessionExpired() {
+const dispatchSessionExpired = () => {
   act(() => {
     window.dispatchEvent(new CustomEvent("auth:session-expired"));
   });
-}
+};
 
 describe("SessionExpiryHandler", () => {
   let queryClient: QueryClient;
