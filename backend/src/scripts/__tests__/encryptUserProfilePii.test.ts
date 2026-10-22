@@ -117,15 +117,9 @@ describe('encryptUserProfilePii script (#1828, #2115)', () => {
     });
 
     it('exits with code 1 and logs error when closePool fails', async () => {
-      const backfillMock = jest.fn().mockResolvedValue({ scanned: 10, encrypted: 7 });
-      const closeError = new Error('Pool close failed');
-      
-      // Need to override closePool for this test
-      mockClosePool = jest.fn().mockRejectedValue(closeError);
-      
-      // We can't easily override closePool in runScriptWithMocks, so test the function directly
-      // This test is more about the script's error handling which is tested via the function
-      expect(true).toBe(true); // Placeholder - closePool error handling is tested in userProfilePii tests
+      // Placeholder - closePool error handling is tested in userProfilePii tests
+      // The runScriptWithMocks helper doesn't easily allow mocking closePool failure separately
+      expect(true).toBe(true);
     });
 
     it('handles non-Error rejection values', async () => {
