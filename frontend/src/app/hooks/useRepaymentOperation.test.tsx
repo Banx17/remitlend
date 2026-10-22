@@ -45,7 +45,7 @@ const BUILD_RESULT = { unsignedTxXdr: UNSIGNED_XDR, networkPassphrase: NETWORK_P
 let mockBuildRepayment: jest.Mock;
 let mockSignTransaction: jest.Mock;
 
-function createTestHarness(hookOptions?: Parameters<typeof useRepaymentOperation>[0]) {
+const createTestHarness = (hookOptions?: Parameters<typeof useRepaymentOperation>[0]) => {
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -57,15 +57,15 @@ function createTestHarness(hookOptions?: Parameters<typeof useRepaymentOperation
   );
   const rendered = renderHook(() => useRepaymentOperation(hookOptions), { wrapper });
   return { ...rendered, queryClient };
-}
+};
 
 /** The zustand transaction record owned by this hook instance (id is useId-based). */
-function getRepaymentTxState() {
+const getRepaymentTxState = () => {
   const { transactions } = useOptimisticUI.getState();
   return Object.values(transactions).find((tx) => tx.id.startsWith("repayment-"));
-}
+};
 
-function createDeferred<T>() {
+const createDeferred = <T,>() => {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
   const promise = new Promise<T>((res, rej) => {
@@ -73,7 +73,7 @@ function createDeferred<T>() {
     reject = rej;
   });
   return { promise, resolve, reject };
-}
+};
 
 describe("useRepaymentOperation", () => {
   beforeEach(() => {
