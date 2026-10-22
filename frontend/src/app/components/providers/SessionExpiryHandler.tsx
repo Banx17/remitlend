@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { useLogout } from "../../hooks/useLogout";
+import { useUserStore } from "../../stores/useUserStore";
 
 /**
  * SessionExpiryHandler
@@ -19,6 +20,13 @@ export function SessionExpiryHandler() {
 
   useEffect(() => {
     const handler = () => {
+      // Several in-flight requests can each 401 before the first redirect
+      // commits, and another tab can expire at the same time. Only the first
+      // event belongs to a live session; navigating again would bounce the
+      // user between routes instead of showing the expiry notice once.
+      const { authToken, isAuthenticated } = useUserStore.getState();
+      if (!authToken && !isAuthenticated) return;
+
       logout({ sessionExpired: true });
     };
 
