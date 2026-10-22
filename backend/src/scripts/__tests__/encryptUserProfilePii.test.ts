@@ -13,7 +13,7 @@ describe('encryptUserProfilePii script (#1828, #2115)', () => {
   let mockExit: jest.Mock<() => never>;
 
   async function runScriptWithMocks(
-    backfillMock: jest.MockedFunction<() => Promise<{ scanned: number; encrypted: number }>>
+    backfillMock: jest.MockedFunction<() => Promise<{ scanned: number; encrypted: number }>>,
   ): Promise<{
     stdout: string[];
     stderr: string[];
