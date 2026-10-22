@@ -1235,4 +1235,5 @@ impl LendingPool {
 
 #[cfg(test)]
 mod rounding_tests;
+#[cfg(test)]
 mod test;
