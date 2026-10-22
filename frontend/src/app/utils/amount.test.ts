@@ -10,6 +10,10 @@ import {
   toStroops,
 } from "./amount";
 
+// `tsc` rejects BigInt literal syntax (`0n`) below ES2020, and this
+// frontend's tsconfig.json targets ES2017.
+const b = (n: number): bigint => BigInt(n);
+
 describe("amount utils", () => {
   describe("getAssetDecimals", () => {
     it("returns known asset decimals", () => {
@@ -92,42 +96,43 @@ describe("amount utils", () => {
 
   describe("fromStroops", () => {
     it("converts stroops back to string for standard 7 decimals", () => {
-      expect(fromStroops(10000000n, 7)).toBe("1.0000000");
-      expect(fromStroops(15000000n, 7)).toBe("1.5000000");
-      expect(fromStroops(1n, 7)).toBe("0.0000001");
-      expect(fromStroops(0n, 7)).toBe("0.0000000");
+      expect(fromStroops(b(10000000), 7)).toBe("1.0000000");
+      expect(fromStroops(b(15000000), 7)).toBe("1.5000000");
+      expect(fromStroops(b(1), 7)).toBe("0.0000001");
+      expect(fromStroops(b(0), 7)).toBe("0.0000000");
     });
 
     it("handles negative amounts", () => {
-      expect(fromStroops(-10000000n, 7)).toBe("-1.0000000");
-      expect(fromStroops(-1n, 7)).toBe("-0.0000001");
+      expect(fromStroops(b(-10000000), 7)).toBe("-1.0000000");
+      expect(fromStroops(b(-1), 7)).toBe("-0.0000001");
     });
 
     it("handles various decimal precisions", () => {
-      expect(fromStroops(100n, 2)).toBe("1.00");
-      expect(fromStroops(1234n, 2)).toBe("12.34");
-      expect(fromStroops(1n, 2)).toBe("0.01");
-      expect(fromStroops(1123n, 3)).toBe("1.123");
-      expect(fromStroops(11234n, 4)).toBe("1.1234");
-      expect(fromStroops(1123456n, 6)).toBe("1.123456");
-      expect(fromStroops(112345678n, 8)).toBe("1.12345678");
+      expect(fromStroops(b(100), 2)).toBe("1.00");
+      expect(fromStroops(b(1234), 2)).toBe("12.34");
+      expect(fromStroops(b(1), 2)).toBe("0.01");
+      expect(fromStroops(b(1123), 3)).toBe("1.123");
+      expect(fromStroops(b(11234), 4)).toBe("1.1234");
+      expect(fromStroops(b(1123456), 6)).toBe("1.123456");
+      expect(fromStroops(b(112345678), 8)).toBe("1.12345678");
     });
 
     it("handles very large stroop values", () => {
-      expect(fromStroops(999999999999999999999n, 7)).toBe("99999999999999.9999999");
-      expect(fromStroops(99999999999999999n, 2)).toBe("999999999999999.99");
+      // Use string to create BigInt to avoid precision loss
+      expect(fromStroops(BigInt("999999999999999999999"), 7)).toBe("99999999999999.9999999");
+      expect(fromStroops(BigInt("99999999999999999"), 2)).toBe("999999999999999.99");
     });
 
     it("handles tiny stroop values", () => {
-      expect(fromStroops(1n, 7)).toBe("0.0000001");
-      expect(fromStroops(1n, 2)).toBe("0.01");
-      expect(fromStroops(1n, 3)).toBe("0.001");
+      expect(fromStroops(b(1), 7)).toBe("0.0000001");
+      expect(fromStroops(b(1), 2)).toBe("0.01");
+      expect(fromStroops(b(1), 3)).toBe("0.001");
     });
 
     it("handles zero correctly", () => {
-      expect(fromStroops(0n, 7)).toBe("0.0000000");
-      expect(fromStroops(0n, 2)).toBe("0.00");
-      expect(fromStroops(0n, 3)).toBe("0.000");
+      expect(fromStroops(b(0), 7)).toBe("0.0000000");
+      expect(fromStroops(b(0), 2)).toBe("0.00");
+      expect(fromStroops(b(0), 3)).toBe("0.000");
     });
   });
 
@@ -230,16 +235,18 @@ describe("amount utils", () => {
       // 3 decimals
       expect(hasInvalidPrecision("1.123", 3)).toBe(false);
       expect(hasInvalidPrecision("1.1234", 3)).toBe(true);
-      expect(getPrecisionError("1.1234", "CUSTOM", 3)).toBe("CUSTOM supports at most 3 decimal places.");
-      
+      expect(getPrecisionError("1.1234", "CUSTOM", 3)).toBe(
+        "CUSTOM supports at most 3 decimal places.",
+      );
+
       // 4 decimals
       expect(hasInvalidPrecision("1.1234", 4)).toBe(false);
       expect(hasInvalidPrecision("1.12345", 4)).toBe(true);
-      
+
       // 6 decimals
       expect(hasInvalidPrecision("1.123456", 6)).toBe(false);
       expect(hasInvalidPrecision("1.1234567", 6)).toBe(true);
-      
+
       // 8 decimals (more than XLM)
       expect(hasInvalidPrecision("1.12345678", 8)).toBe(false);
       expect(hasInvalidPrecision("1.123456789", 8)).toBe(true);
@@ -334,11 +341,7 @@ describe("amount utils", () => {
     });
 
     it("round-trips 2-decimal amounts (USDC)", () => {
-      const amounts = [
-        "12.34",
-        "0.01",
-        "999999999999999.99",
-      ];
+      const amounts = ["12.34", "0.01", "999999999999999.99"];
       for (const amount of amounts) {
         const stroops = toStroops(amount, 2);
         expect(stroops).not.toBeNull();
@@ -405,13 +408,13 @@ describe("amount utils", () => {
     it("handles negative amounts correctly", () => {
       expect(toStroops("-1", 7)?.toString()).toBe("-10000000");
       expect(toStroops("-1.5", 7)?.toString()).toBe("-15000000");
-      expect(fromStroops(-10000000n, 7)).toBe("-1.0000000");
-      expect(fromStroops(-15000000n, 7)).toBe("-1.5000000");
+      expect(fromStroops(b(-10000000), 7)).toBe("-1.0000000");
+      expect(fromStroops(b(-15000000), 7)).toBe("-1.5000000");
     });
 
     it("handles values with many leading zeros", () => {
       expect(toStroops("0000001.5000000", 7)?.toString()).toBe("15000000");
-      expect(fromStroops(15000000n, 7)).toBe("1.5000000");
+      expect(fromStroops(b(15000000), 7)).toBe("1.5000000");
     });
   });
 });
