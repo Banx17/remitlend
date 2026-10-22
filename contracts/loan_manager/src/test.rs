@@ -661,10 +661,25 @@ fn test_unauthorized_approval_emits_no_event_and_keeps_loan_pending() {
         &None,
     );
     let loan_id = manager.request_loan(&borrower, &1_000, &17_280);
-     
-      // A failed call discards its events, and `all()` only reflects the last invocation.
-    assert_eq!(env.events().all().len(), 0);
-     assert_eq!(manager.get_loan(&loan_id).status, LoanStatus::Pending);
+
+    env.mock_auths(&[]);
+    assert!(manager.try_approve_loan(&loan_id).is_err());
+
+    let approval_emitted = env.events().all().iter().any(|(_contract, topics, _data)| {
+        topics
+            .get(0)
+            .map(|t| {
+                let sym = soroban_sdk::Symbol::from_val(&env, &t);
+                sym == soroban_sdk::Symbol::new(&env, "LoanApproved")
+                    || sym == soroban_sdk::symbol_short!("LoanApprv")
+            })
+            .unwrap_or(false)
+    });
+    assert!(
+        !approval_emitted,
+        "unauthorized approval must not emit approval events"
+    );
+    assert_eq!(manager.get_loan(&loan_id).status, LoanStatus::Pending);
 }
 
 #[test]
