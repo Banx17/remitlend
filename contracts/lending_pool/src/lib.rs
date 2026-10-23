@@ -1010,19 +1010,33 @@ impl LendingPool {
         let total_outstanding = Self::read_total_outstanding(&env, &token);
 
         // Utilisation: portion of tracked principal/managed assets currently out on loan.
-        let utilization_bps = if total_managed_assets > 0 && total_outstanding > 0 {
-            let numerator = total_outstanding
-                .checked_mul(10_000)
-                .expect("utilisation overflow");
-            let bps = money::round_div(numerator, total_managed_assets, money::RoundingMode::Floor)
-                .expect("utilisation overflow") as u32;
-            core::cmp::min(bps, 10_000)
-        } else if total_deposits > 0
-            && pool_token_balance < total_deposits
-            && total_outstanding == 0
-        {
-            let borrowed = total_deposits - pool_token_balance;
-            ((borrowed * 10_000) / total_deposits) as u32
+        let utilization_bps = if total_deposits > 0 {
+            // Determine borrowed amount: prefer tracked outstanding, fall back to
+            // balance-derived estimate when the loan-manager address is not configured.
+            let borrowed = if total_outstanding > 0 {
+                total_outstanding
+            } else if pool_token_balance < total_deposits {
+                total_deposits - pool_token_balance
+            } else {
+                0
+            };
+
+            if borrowed > 0 {
+                let denominator = if total_managed_assets > 0 {
+                    total_managed_assets
+                } else {
+                    total_deposits
+                };
+                let numerator = borrowed
+                    .checked_mul(10_000)
+                    .expect("utilisation overflow");
+                let bps =
+                    money::round_div(numerator, denominator, money::RoundingMode::Floor)
+                        .expect("utilisation overflow") as u32;
+                core::cmp::min(bps, 10_000)
+            } else {
+                0
+            }
         } else {
             0
         };
