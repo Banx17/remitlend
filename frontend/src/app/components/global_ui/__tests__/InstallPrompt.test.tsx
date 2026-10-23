@@ -1,28 +1,34 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { InstallPrompt, DISMISSED_STORAGE_KEY } from "../InstallPrompt";
 
+type Outcome = "accepted" | "dismissed";
+
 interface MockBeforeInstallPromptEvent extends Event {
-  prompt: () => Promise<void>;
-  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
-  outcome: "accepted" | "dismissed";
+  prompt: jest.Mock<Promise<void>, []>;
+  userChoice: Promise<{ outcome: Outcome }>;
 }
 
-function createInstallEvent(outcome: "accepted" | "dismissed"): MockBeforeInstallPromptEvent {
-  const event = new Event("beforeinstallprompt", { cancelable: true }) as MockBeforeInstallPromptEvent;
-  event.prompt = vi.fn(() => Promise.resolve());
+const PROMPT_TEXT = /Install RemitLend for offline access/i;
+
+const createInstallEvent = (outcome: Outcome): MockBeforeInstallPromptEvent => {
+  const event = new Event("beforeinstallprompt", {
+    cancelable: true,
+  }) as MockBeforeInstallPromptEvent;
+  event.prompt = jest.fn(() => Promise.resolve());
   event.userChoice = Promise.resolve({ outcome });
-  event.outcome = outcome;
   return event;
-}
+};
 
-function dispatchBeforeInstallPrompt(outcome: "accepted" | "dismissed") {
+const dispatchBeforeInstallPrompt = (outcome: Outcome): MockBeforeInstallPromptEvent => {
   const event = createInstallEvent(outcome);
   act(() => {
     window.dispatchEvent(event);
   });
   return event;
-}
+};
+
+const installButton = () => screen.getByRole("button", { name: /^install$/i });
+const dismissButton = () => screen.getByRole("button", { name: /dismiss install prompt/i });
 
 describe("InstallPrompt", () => {
   beforeEach(() => {
@@ -31,14 +37,14 @@ describe("InstallPrompt", () => {
 
   afterEach(() => {
     window.localStorage.clear();
-    vi.restoreAllMocks();
+    jest.restoreAllMocks();
   });
 
   it("renders nothing when the browser does not support install prompts", () => {
     const { container } = render(<InstallPrompt />);
 
-    expect(container).toBeEmpty();
-    expect(screen.queryByText(/Install RemitLend for offline access/i)).not.toBeInTheDocument();
+    expect(container).toBeEmptyDOMElement();
+    expect(screen.queryByText(PROMPT_TEXT)).not.toBeInTheDocument();
   });
 
   it("shows the prompt when the browser fires beforeinstallprompt", () => {
@@ -46,10 +52,8 @@ describe("InstallPrompt", () => {
 
     dispatchBeforeInstallPrompt("accepted");
 
-    expect(
-      screen.getByText(/Install RemitLend for offline access/i)
-    ).toBeInTheDocument();
-    expect(screen.getByButtonName(/^install$/i)).toBeInTheDocument();
+    expect(screen.getByText(PROMPT_TEXT)).toBeInTheDocument();
+    expect(installButton()).toBeInTheDocument();
   });
 
   it("prevents the default browser behavior for the install event", () => {
@@ -66,15 +70,11 @@ describe("InstallPrompt", () => {
     const event = dispatchBeforeInstallPrompt("accepted");
 
     await act(async () => {
-      screen.getByButtonName(/^install$/i).click();
+      fireEvent.click(installButton());
     });
 
-    expect(event.prompt).toHaveBeenCalledOnce();
-    await waitFor(() =>
-      expect(
-        screen.queryByText(/Install RemitLend for offline access/i)
-      ).not.toBeInTheDocument()
-    );
+    expect(event.prompt).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByText(PROMPT_TEXT)).not.toBeInTheDocument());
   });
 
   it("keeps the prompt visible when the user dismisses the native install dialog", async () => {
@@ -83,37 +83,27 @@ describe("InstallPrompt", () => {
     const event = dispatchBeforeInstallPrompt("dismissed");
 
     await act(async () => {
-      screen.getByButtonName(/^install$/i).click();
+      fireEvent.click(installButton());
     });
 
-    expect(event.prompt).toHaveBeenCalledOnce();
-    expect(
-      screen.getByText(/Install RemitLend for offline access/i)
-    ).toBeInTheDocument();
+    expect(event.prompt).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(PROMPT_TEXT)).toBeInTheDocument();
   });
 
   it("hides the prompt when the user clicks the dismiss button", () => {
     render(<InstallPrompt />);
 
     dispatchBeforeInstallPrompt("accepted");
+    fireEvent.click(dismissButton());
 
-    act(() => {
-      screen.getByButtonName(/dismiss install prompt/i).click();
-    });
-
-    expect(
-      screen.queryByText(/Install RemitLend for offline access/i)
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(PROMPT_TEXT)).not.toBeInTheDocument();
   });
 
   it("persists the dismissal to localStorage", () => {
     render(<InstallPrompt />);
 
     dispatchBeforeInstallPrompt("accepted");
-
-    act(() => {
-      screen.getByButtonName(/dismiss install prompt/i).click();
-    });
+    fireEvent.click(dismissButton());
 
     expect(window.localStorage.getItem(DISMISSED_STORAGE_KEY)).toBe("true");
   });
@@ -125,20 +115,15 @@ describe("InstallPrompt", () => {
 
     dispatchBeforeInstallPrompt("accepted");
 
-    expect(
-      screen.queryByText(/Install RemitLend for offline access/i)
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(PROMPT_TEXT)).not.toBeInTheDocument();
   });
 
   it("removes the beforeinstallprompt listener on unmount", () => {
-    const removeSpy = vi.spyOn(window, "removeEventListener");
+    const removeSpy = jest.spyOn(window, "removeEventListener");
     const { unmount } = render(<InstallPrompt />);
 
     unmount();
 
-    expect(removeSpy).toHaveBeenCalledWith(
-      "beforeinstallprompt",
-      expect.anything
-    );
+    expect(removeSpy).toHaveBeenCalledWith("beforeinstallprompt", expect.anything());
   });
 });
