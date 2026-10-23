@@ -1146,3 +1146,218 @@ fn instance_ttl_survives_idle_proposal_period() {
     assert_eq!(client.get_pending().unwrap().proposed_admin, proposed);
 }
 
+// ── Quorum threshold changes (#2152) ─────────────────────────────────────────
+//
+// A threshold change always arrives as a fresh `propose_admin_transfer`
+// proposal: the signer set and the number of approvals it needs are
+// re-declared every time, and no approval carries over from the previous
+// quorum. These tests pin down the success, failure, boundary and
+// authorization paths.
+
+fn generate_signers(env: &Env, count: u32) -> Vec<Address> {
+    let mut signers = Vec::new(env);
+    for _ in 0..count {
+        signers.push_back(Address::generate(env));
+    }
+    signers
+}
+
+/// Reducing the quorum from 2-of-3 to 1-of-2 in a follow-up proposal drops
+/// the removed signer: it can no longer approve, and a single approval from
+/// the surviving set is enough to finalize.
+#[test]
+fn threshold_change_lowers_quorum_after_removing_a_signer() {
+    let (env, client, admin, _) = setup();
+    let first_admin = Address::generate(&env);
+    let second_admin = Address::generate(&env);
+    let s1 = Address::generate(&env);
+    let s2 = Address::generate(&env);
+    let removed = Address::generate(&env);
+
+    // Quorum 2-of-3.
+    set_ts(&env, 1_000);
+    let signers_three = Vec::from_slice(&env, &[s1.clone(), s2.clone(), removed.clone()]);
+    client.propose_admin_transfer(&first_admin, &signers_three, &2, &MIN_TIMELOCK_SECONDS);
+    assert_eq!(client.get_threshold(), 2);
+    assert_eq!(client.get_signers().len(), 3);
+
+    client.approve_transfer(&s1);
+    client.approve_transfer(&s2);
+    set_ts(&env, 1_000 + MIN_TIMELOCK_SECONDS);
+    client.finalize_admin_transfer(&admin);
+    assert_eq!(client.get_current_admin(), first_admin);
+
+    // Quorum 1-of-2 with `removed` dropped from the signer set.
+    set_ts(&env, 2_000 + MIN_TIMELOCK_SECONDS);
+    let signers_two = Vec::from_slice(&env, &[s1.clone(), s2.clone()]);
+    client.propose_admin_transfer(&second_admin, &signers_two, &1, &MIN_TIMELOCK_SECONDS);
+
+    assert_eq!(client.get_threshold(), 1);
+    assert_eq!(client.get_signers().len(), 2);
+    assert_eq!(client.get_approval_count(), 0);
+    assert!(!client.has_approved(&s1));
+
+    // The removed signer is outside the quorum and is rejected outright.
+    assert!(!client.has_approved(&removed));
+    let rejected = client.try_approve_transfer(&removed);
+    assert_eq!(rejected, Err(Ok(GovernanceError::SignerNotAllowed)));
+
+    // One surviving signer meets the reduced threshold.
+    client.approve_transfer(&s2);
+    assert_eq!(client.get_approval_count(), 1);
+    set_ts(&env, 2_000 + 2 * MIN_TIMELOCK_SECONDS);
+    client.finalize_admin_transfer(&admin);
+    assert_eq!(client.get_current_admin(), second_admin);
+    assert!(!client.has_pending_transfer());
+}
+
+/// Raising the quorum to unanimity is accepted, and every listed signer is
+/// then required: `len - 1` approvals are rejected with `ThresholdNotMet`.
+#[test]
+fn unanimous_threshold_requires_every_signer() {
+    let (env, client, admin, _) = setup();
+    let proposed = Address::generate(&env);
+    let s1 = Address::generate(&env);
+    let s2 = Address::generate(&env);
+    let s3 = Address::generate(&env);
+    let signers = Vec::from_slice(&env, &[s1.clone(), s2.clone(), s3.clone()]);
+
+    set_ts(&env, 1_000);
+    client.propose_admin_transfer(&proposed, &signers, &3, &MIN_TIMELOCK_SECONDS);
+    assert_eq!(client.get_threshold(), 3);
+
+    client.approve_transfer(&s1);
+    client.approve_transfer(&s2);
+    set_ts(&env, 1_000 + MIN_TIMELOCK_SECONDS);
+    let result = client.try_finalize_admin_transfer(&admin);
+    assert_eq!(result, Err(Ok(GovernanceError::ThresholdNotMet)));
+    assert_eq!(client.get_current_admin(), admin);
+
+    client.approve_transfer(&s3);
+    client.finalize_admin_transfer(&admin);
+    assert_eq!(client.get_current_admin(), proposed);
+}
+
+/// A quorum of zero is never valid, regardless of how many signers exist.
+#[test]
+fn propose_rejects_zero_threshold() {
+    let (env, client, _, _) = setup();
+    let signers = generate_signers(&env, 2);
+    let result = client.try_propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &0,
+        &MIN_TIMELOCK_SECONDS,
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::ThresholdTooLow)));
+}
+
+/// The threshold is validated against the signer list of the proposal being
+/// submitted, so a threshold sized for a previous, larger quorum is rejected
+/// once a signer has been removed.
+#[test]
+fn propose_rejects_threshold_above_remaining_signers() {
+    let (env, client, admin, _) = setup();
+    let s1 = Address::generate(&env);
+    let s2 = Address::generate(&env);
+    let s3 = Address::generate(&env);
+
+    set_ts(&env, 1_000);
+    let signers_three = Vec::from_slice(&env, &[s1.clone(), s2.clone(), s3.clone()]);
+    client.propose_admin_transfer(
+        &Address::generate(&env),
+        &signers_three,
+        &2,
+        &MIN_TIMELOCK_SECONDS,
+    );
+    client.approve_transfer(&s1);
+    client.approve_transfer(&s2);
+    set_ts(&env, 1_000 + MIN_TIMELOCK_SECONDS);
+    client.finalize_admin_transfer(&admin);
+
+    set_ts(&env, 2_000 + MIN_TIMELOCK_SECONDS);
+    let signers_two = Vec::from_slice(&env, &[s1.clone(), s2.clone()]);
+    let result = client.try_propose_admin_transfer(
+        &Address::generate(&env),
+        &signers_two,
+        &3,
+        &MIN_TIMELOCK_SECONDS,
+    );
+    assert_eq!(
+        result,
+        Err(Ok(GovernanceError::ThresholdExceedsSignerCount))
+    );
+}
+
+/// The largest allowed signer set can run with a unanimous threshold and still
+/// reach finalization once every signer approves.
+#[test]
+fn max_signer_quorum_accepts_unanimous_threshold() {
+    let (env, client, admin, _) = setup();
+    let proposed = Address::generate(&env);
+    let signers = generate_signers(&env, MAX_SIGNERS);
+
+    set_ts(&env, 1_000);
+    client.propose_admin_transfer(&proposed, &signers, &MAX_SIGNERS, &MIN_TIMELOCK_SECONDS);
+    assert_eq!(client.get_signers().len(), MAX_SIGNERS);
+    assert_eq!(client.get_threshold(), MAX_SIGNERS);
+
+    for signer in signers.iter() {
+        client.approve_transfer(&signer);
+    }
+    assert_eq!(client.get_approval_count(), MAX_SIGNERS);
+
+    set_ts(&env, 1_000 + MIN_TIMELOCK_SECONDS);
+    client.finalize_admin_transfer(&admin);
+    assert_eq!(client.get_current_admin(), proposed);
+}
+
+/// Cancelling a proposal clears the quorum, so the threshold and signer views
+/// report the documented `NoPendingTransfer` error instead of stale values.
+#[test]
+fn quorum_views_report_no_pending_after_cancel() {
+    let (env, client, _, _) = setup();
+    let signers = generate_signers(&env, 2);
+    client.propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &1,
+        &MIN_TIMELOCK_SECONDS,
+    );
+    client.cancel_admin_transfer();
+
+    assert_eq!(
+        client.try_get_threshold(),
+        Err(Ok(GovernanceError::NoPendingTransfer))
+    );
+    assert_eq!(
+        client.try_get_signers(),
+        Err(Ok(GovernanceError::NoPendingTransfer))
+    );
+}
+
+/// Only the current admin may declare a new signer set and threshold.
+#[test]
+#[should_panic]
+fn propose_threshold_change_requires_admin_auth() {
+    let (env, client, _admin, _) = setup();
+    env.mock_auths(&[]);
+    let signers = generate_signers(&env, 1);
+    client.propose_admin_transfer(
+        &Address::generate(&env),
+        &signers,
+        &1,
+        &MIN_TIMELOCK_SECONDS,
+    );
+}
+
+/// The quorum-related error variants are part of the public contract that
+/// clients branch on, so their codes are pinned here.
+#[test]
+fn quorum_error_codes_are_stable() {
+    assert_eq!(GovernanceError::ThresholdExceedsSignerCount as u32, 4006);
+    assert_eq!(GovernanceError::ThresholdTooLow as u32, 4007);
+    assert_eq!(GovernanceError::TooManySigners as u32, 4008);
+    assert_eq!(GovernanceError::SignerNotAllowed as u32, 4009);
+    assert_eq!(GovernanceError::ThresholdNotMet as u32, 4011);
+}

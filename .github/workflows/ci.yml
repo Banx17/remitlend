@@ -295,6 +295,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+      # Issue #2152: the governance quorum (signer set + threshold) is the
+      # security boundary for every admin handover, so its tests run on every
+      # change instead of being executed ad hoc by reviewers.
+      - name: Multisig governance quorum tests
+        run: cargo test -p multisig_governance --lib
+        working-directory: contracts
       - name: Contracts check
         run: echo "Contracts format, clippy, tests, and build passed"
 
