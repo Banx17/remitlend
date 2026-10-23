@@ -44,6 +44,7 @@
 //! | `accrue` | `("accrue", loan_id: u32)` | `(index: i128, index_delta: i128, interest_delta: i128, residual: i128)` |
 
 use soroban_sdk::{symbol_short, Address, Env, String, Symbol};
+use crate::LoanManager;
 
 /// Emits event when a borrower requests a new loan.
 ///
@@ -430,4 +431,109 @@ pub fn accrue(
     let topics = (Symbol::new(env, "accrue"), loan_id);
     env.events()
         .publish(topics, (index, index_delta, interest_delta, residual));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, testutils::Events, FromVal};
+
+    #[test]
+    fn loan_requested_schema_preserves_indexed_field_order() {
+        let env = Env::default();
+        let borrower = Address::generate(&env);
+
+       
+       let contract_id = env.register(LoanManager, ());
+        env.as_contract(&contract_id, || {
+            loan_requested(&env, 7, borrower.clone(), 12_345);
+         });
+
+        let event = env.events().all().get(0).unwrap();
+        assert_eq!(event.1.len(), 3);
+        assert_eq!(
+            Symbol::from_val(&env, &event.1.get(0).unwrap()),
+            Symbol::new(&env, "LoanRequested")
+        );
+        assert_eq!(u32::from_val(&env, &event.1.get(1).unwrap()), 7);
+        assert_eq!(Address::from_val(&env, &event.1.get(2).unwrap()), borrower);
+        assert_eq!(i128::from_val(&env, &event.2), 12_345);
+    }
+
+    #[test]
+    fn rejection_and_cancellation_keep_their_distinct_payload_layouts() {
+        let env = Env::default();
+        let borrower = Address::generate(&env);
+        let reason = String::from_str(&env, "manual review failed");
+
+        let contract_id = env.register(LoanManager, ());
+        env.as_contract(&contract_id, || {
+            loan_rejected(&env, 9, reason.clone());
+            loan_cancelled(&env, borrower.clone(), 9);
+         });
+
+        let events = env.events().all();
+        let rejected = events.get(0).unwrap();
+        assert_eq!(rejected.1.len(), 2);
+        assert_eq!(
+            Symbol::from_val(&env, &rejected.1.get(0).unwrap()),
+            Symbol::new(&env, "LoanRejected")
+        );
+        assert_eq!(u32::from_val(&env, &rejected.1.get(1).unwrap()), 9);
+        assert_eq!(String::from_val(&env, &rejected.2), reason);
+
+        let cancelled = events.get(1).unwrap();
+        assert_eq!(cancelled.1.len(), 2);
+        assert_eq!(
+            Symbol::from_val(&env, &cancelled.1.get(0).unwrap()),
+            Symbol::new(&env, "LoanCancelled")
+        );
+        assert_eq!(
+            Address::from_val(&env, &cancelled.1.get(1).unwrap()),
+            borrower
+        );
+        assert_eq!(u32::from_val(&env, &cancelled.2), 9);
+    }
+
+    #[test]
+    fn approval_schema_preserves_maximum_width_field_values() {
+        let env = Env::default();
+        let borrower = Address::generate(&env);
+
+     let contract_id = env.register(LoanManager, ());
+       env.as_contract(&contract_id, || {
+             loan_approved(&env, u32::MAX, borrower.clone(), u32::MAX, u32::MAX);
+       });
+
+        let event = env.events().all().get(0).unwrap();
+        assert_eq!(event.1.len(), 3);
+        assert_eq!(
+            Symbol::from_val(&env, &event.1.get(0).unwrap()),
+            Symbol::new(&env, "LoanApproved")
+        );
+        assert_eq!(u32::from_val(&env, &event.1.get(1).unwrap()), u32::MAX);
+        assert_eq!(Address::from_val(&env, &event.1.get(2).unwrap()), borrower);
+        assert_eq!(<(u32, u32)>::from_val(&env, &event.2), (u32::MAX, u32::MAX));
+    }
+
+    #[test]
+    fn admin_approval_keeps_legacy_short_symbol_and_topic_order() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+
+       let contract_id = env.register(LoanManager, ());
+      env.as_contract(&contract_id, || {
+           loan_approved_by_admin(&env, admin.clone(), 11, borrower.clone());
+        });
+        
+        let event = env.events().all().get(0).unwrap();
+        assert_eq!(event.1.len(), 2);
+        assert_eq!(
+            Symbol::from_val(&env, &event.1.get(0).unwrap()),
+            symbol_short!("LoanApprv")
+        );
+        assert_eq!(Address::from_val(&env, &event.1.get(1).unwrap()), admin);
+        assert_eq!(<(u32, Address)>::from_val(&env, &event.2), (11, borrower));
+    }
 }
