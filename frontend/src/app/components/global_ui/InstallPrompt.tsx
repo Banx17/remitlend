@@ -10,14 +10,14 @@ interface BeforeInstallPromptEvent extends Event {
 
 export const DISMISSED_STORAGE_KEY = "install-prompt-dismissed";
 
-export function isInstallPromptDismissed(): boolean {
+export const isInstallPromptDismissed = (): boolean => {
   if (typeof window === "undefined") return false;
   try {
     return window.localStorage.getItem(DISMISSED_STORAGE_KEY) === "true";
   } catch {
     return false;
   }
-}
+};
 
 export function InstallPrompt() {
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
@@ -56,7 +56,7 @@ export function InstallPrompt() {
 
   return (
     <div className="fixed bottom-4 right-4 z-50 flex items-center gap-3 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 shadow-lg dark:border-indigo-900/50 dark:bg-indigo-950/40">
-      <Download className="h-w-5 w-5 text-indigo-600 dark:text-indigo-400" />
+      <Download className="h-5 w-5 text-indigo-600 dark:text-indigo-400" />
       <p className="text-sm font-medium text-indigo-900 dark:text-indigo-200">
         Install RemitLend for offline access
       </p>
