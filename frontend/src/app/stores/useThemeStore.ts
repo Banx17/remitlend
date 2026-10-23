@@ -3,7 +3,6 @@ import { devtools } from "zustand/middleware";
 import {
   THEME_STORAGE_KEY,
   type Theme,
-  getSystemTheme,
   getStoredTheme,
   applyTheme,
   resolveInitialTheme,
@@ -23,6 +22,10 @@ interface ThemeActions {
 export type ThemeStore = ThemeState & ThemeActions;
 
 let hasAttachedSystemThemeListener = false;
+
+export const resetThemeListenerState = () => {
+  hasAttachedSystemThemeListener = false;
+};
 
 export const useThemeStore = create<ThemeStore>()(
   devtools(
@@ -58,11 +61,17 @@ export const useThemeStore = create<ThemeStore>()(
       },
 
       setTheme: (theme) => {
-        applyTheme(theme);
+        const validTheme: Theme =
+          theme === "dark" || theme === "light" || theme === "system" ? theme : "light";
+        applyTheme(validTheme);
         if (typeof window !== "undefined") {
-          window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+          try {
+            window.localStorage.setItem(THEME_STORAGE_KEY, validTheme);
+          } catch {
+            // Ignore storage write errors (e.g., quota exceeded or private mode)
+          }
         }
-        set({ theme, hydrated: true }, false, "theme/setTheme");
+        set({ theme: validTheme, hydrated: true }, false, "theme/setTheme");
       },
 
       toggleTheme: () => {
