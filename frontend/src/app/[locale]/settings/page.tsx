@@ -572,14 +572,14 @@ function DisplaySection() {
   const pathname = usePathname();
   const [isPending, startTransition] = useTransition();
 
-  function handleLanguageChange(event: ChangeEvent<HTMLSelectElement>) {
+  const onLocaleSelect = (event: ChangeEvent<HTMLSelectElement>) => {
     const nextLocale = event.target.value;
     if (!LANGUAGES.some((language) => language.code === nextLocale)) return;
 
     const segments = pathname.split("/");
     segments[1] = nextLocale;
     startTransition(() => router.replace(segments.join("/")));
-  }
+  };
 
   const theme = useThemeStore((s) => s.theme);
   const hydrated = useThemeStore((s) => s.hydrated);
@@ -633,7 +633,7 @@ function DisplaySection() {
           </label>
           <select
             value={locale}
-            onChange={handleLanguageChange}
+            onChange={onLocaleSelect}
             disabled={isPending}
             className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-indigo-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-50"
           >
