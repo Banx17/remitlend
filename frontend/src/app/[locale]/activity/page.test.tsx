@@ -43,7 +43,7 @@ jest.mock("../../hooks/useApi", () => {
   };
 });
 
-function renderPage() {
+const renderPage = () => {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -53,7 +53,7 @@ function renderPage() {
       <ActivityPage />
     </QueryClientProvider>,
   );
-}
+};
 
 describe("ActivityPage", () => {
   beforeEach(() => {
