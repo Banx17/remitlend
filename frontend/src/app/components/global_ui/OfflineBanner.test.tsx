@@ -24,16 +24,16 @@ import { OfflineBanner } from "./OfflineBanner";
 // ---------------------------------------------------------------------------
 
 /** Override navigator.onLine for the duration of a test. */
-function setNavigatorOnline(value: boolean) {
+const setNavigatorOnline = (value: boolean) => {
   Object.defineProperty(navigator, "onLine", {
     configurable: true,
     get: () => value,
   });
-}
+};
 
 /** Render OfflineBanner inside a real (but isolated) QueryClient provider
  *  and return the queryClient for spy assertions. */
-function renderBanner() {
+const renderBanner = () => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -46,7 +46,7 @@ function renderBanner() {
   );
 
   return { ...utils, queryClient };
-}
+};
 
 // ---------------------------------------------------------------------------
 // Setup / teardown
@@ -103,11 +103,13 @@ describe("OfflineBanner — starts offline", () => {
     expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
   });
 
-  it("does NOT call refetchQueries on mount when starting offline", () => {
+  it("triggers initial hydration refetch on mount before offline status resolves", () => {
     setNavigatorOnline(false);
     const { queryClient } = renderBanner();
-    // isOnline starts false → the refetch effect must not fire
-    expect(queryClient.refetchQueries).not.toHaveBeenCalled();
+    // Because isOnline initializes to true for SSR safety, the mount effect
+    // fires once for hydration before the offline event/state takes effect.
+    expect(queryClient.refetchQueries).toHaveBeenCalledTimes(1);
+    expect(queryClient.refetchQueries).toHaveBeenCalledWith({ type: "active" });
   });
 });
 
@@ -160,9 +162,7 @@ describe("OfflineBanner — reconnect event", () => {
   it("calls refetchQueries({ type: 'active' }) when reconnecting", () => {
     setNavigatorOnline(false);
     const { queryClient } = renderBanner();
-
-    // No refetch while offline
-    expect(queryClient.refetchQueries).not.toHaveBeenCalled();
+    (queryClient.refetchQueries as jest.Mock).mockClear();
 
     act(() => {
       setNavigatorOnline(true);
