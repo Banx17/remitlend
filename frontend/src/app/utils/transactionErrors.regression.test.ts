@@ -21,16 +21,16 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeFetchResponse(
+const makeFetchResponse = (
   status: number,
   body?: Record<string, unknown>,
-): Response {
+): Response => {
   return {
     status,
     ok: status >= 200 && status < 300,
     json: async () => body ?? {},
   } as unknown as Response;
-}
+};
 
 // ---------------------------------------------------------------------------
 // ERROR_CODE_MESSAGES
@@ -306,6 +306,8 @@ describe("fetchTransactionStatus — boundary cases", () => {
     jest.restoreAllMocks();
   });
 
+  const mockHorizonUrl = 'https://horizon.example.com';
+
   it("treats successful: undefined as falsy and returns 'failed'", async () => {
     // Horizon may omit the 'successful' field in some edge-case responses.
     // The falsy check `payload.successful ? 'success' : 'failed'` should yield 'failed'.
@@ -315,7 +317,7 @@ describe("fetchTransactionStatus — boundary cases", () => {
 
     const status = await fetchTransactionStatus(
       "tx-boundary",
-      "https://horizon.example.com",
+      mockHorizonUrl,
     );
     expect(status).toBe("failed");
   });
@@ -327,7 +329,7 @@ describe("fetchTransactionStatus — boundary cases", () => {
 
     const status = await fetchTransactionStatus(
       "tx-boundary",
-      "https://horizon.example.com",
+      mockHorizonUrl,
     );
     expect(status).toBe("failed");
   });
@@ -338,12 +340,12 @@ describe("fetchTransactionStatus — boundary cases", () => {
 
     await fetchTransactionStatus(
       "tx-signal-test",
-      "https://horizon.example.com",
+      mockHorizonUrl,
       controller.signal,
     );
 
     expect(global.fetch).toHaveBeenCalledWith(
-      "https://horizon.example.com/transactions/tx-signal-test",
+      `${mockHorizonUrl}/transactions/tx-signal-test`,
       { signal: controller.signal },
     );
   });
@@ -353,7 +355,7 @@ describe("fetchTransactionStatus — boundary cases", () => {
       global.fetch = jest.fn().mockResolvedValue(makeFetchResponse(status));
 
       await expect(
-        fetchTransactionStatus("tx-err", "https://horizon.example.com"),
+        fetchTransactionStatus("tx-err", mockHorizonUrl),
       ).rejects.toThrow(`Unable to fetch transaction status (${status})`);
     }
   });
@@ -366,6 +368,9 @@ describe("fetchTransactionStatus — boundary cases", () => {
 describe("pollTransactionStatus — additional paths", () => {
   const originalFetch = global.fetch;
   const originalEnv = process.env.NEXT_PUBLIC_HORIZON_URL;
+  const mockHorizonUrl = 'https://horizon.example.com';
+  const customHorizonUrl = 'https://custom-horizon.example.com';
+  const stellarTestnetUrl = 'https://horizon-testnet.stellar.org';
 
   afterEach(() => {
     global.fetch = originalFetch;
@@ -387,7 +392,7 @@ describe("pollTransactionStatus — additional paths", () => {
     });
 
     const result = await pollTransactionStatus("tx-mid-abort", {
-      horizonUrl: "https://horizon.example.com",
+      horizonUrl: mockHorizonUrl,
       intervalMs: 50,   // long enough for abort to fire during delay
       timeoutMs: 2000,
       signal: controller.signal,
@@ -402,7 +407,8 @@ describe("pollTransactionStatus — additional paths", () => {
   });
 
   it("uses NEXT_PUBLIC_HORIZON_URL env variable as the default horizonUrl", async () => {
-    process.env.NEXT_PUBLIC_HORIZON_URL = "https://custom-horizon.example.com";
+    const horizonEnvKey = "NEXT_PUBLIC_HORIZON_URL";
+    process.env[horizonEnvKey] = customHorizonUrl;
 
     global.fetch = jest.fn().mockResolvedValue(
       makeFetchResponse(200, { successful: true }),
@@ -416,7 +422,7 @@ describe("pollTransactionStatus — additional paths", () => {
 
     expect(result.status).toBe("success");
     expect(global.fetch).toHaveBeenCalledWith(
-      "https://custom-horizon.example.com/transactions/tx-env-default",
+      `${customHorizonUrl}/transactions/tx-env-default`,
       expect.anything(),
     );
   });
@@ -434,18 +440,18 @@ describe("pollTransactionStatus — additional paths", () => {
     });
 
     expect(global.fetch).toHaveBeenCalledWith(
-      "https://horizon-testnet.stellar.org/transactions/tx-fallback",
+      `${stellarTestnetUrl}/transactions/tx-fallback`,
       expect.anything(),
     );
   });
 
   it("respects a zero-length timeout and returns timeout immediately", async () => {
     // timeoutMs: 0 — the while condition is false on the first check, so no
-    // fetch should be attempted and the function returns 'timeout' immediately.
+    // fetch call is attempted and pollTransactionStatus returns 'timeout' immediately.
     global.fetch = jest.fn();
 
     const result = await pollTransactionStatus("tx-zero-timeout", {
-      horizonUrl: "https://horizon.example.com",
+      horizonUrl: mockHorizonUrl,
       intervalMs: 10,
       timeoutMs: 0,
     });
