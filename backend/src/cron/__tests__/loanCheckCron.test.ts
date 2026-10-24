@@ -101,13 +101,25 @@ describe('loanDueCheckCron (#2028, #2116)', () => {
 
       expect(mockCreateNotification).toHaveBeenCalledTimes(3);
       expect(mockCreateNotification).toHaveBeenCalledWith(
-        expect.objectContaining({ loanId: 1, userId: 'GADDR1', message: expect.stringContaining('1') })
+        expect.objectContaining({
+          loanId: 1,
+          userId: 'GADDR1',
+          message: expect.stringContaining('1'),
+        }),
       );
       expect(mockCreateNotification).toHaveBeenCalledWith(
-        expect.objectContaining({ loanId: 2, userId: 'GADDR2', message: expect.stringContaining('2') })
+        expect.objectContaining({
+          loanId: 2,
+          userId: 'GADDR2',
+          message: expect.stringContaining('2'),
+        }),
       );
       expect(mockCreateNotification).toHaveBeenCalledWith(
-        expect.objectContaining({ loanId: 3, userId: 'GADDR3', message: expect.stringContaining('3') })
+        expect.objectContaining({
+          loanId: 3,
+          userId: 'GADDR3',
+          message: expect.stringContaining('3'),
+        }),
       );
       expect(mockRecordSuccess).toHaveBeenCalledWith('loanDueCheckCron', expect.any(Number));
     });
@@ -134,7 +146,11 @@ describe('loanDueCheckCron (#2028, #2116)', () => {
 
       await capturedCallback!();
 
-      expect(mockRecordFailure).toHaveBeenCalledWith('loanDueCheckCron', dbError, expect.any(Number));
+      expect(mockRecordFailure).toHaveBeenCalledWith(
+        'loanDueCheckCron',
+        dbError,
+        expect.any(Number),
+      );
       expect(mockRecordSuccess).not.toHaveBeenCalled();
     });
 
@@ -149,7 +165,11 @@ describe('loanDueCheckCron (#2028, #2116)', () => {
 
       await capturedCallback!();
 
-      expect(mockRecordFailure).toHaveBeenCalledWith('loanDueCheckCron', notificationError, expect.any(Number));
+      expect(mockRecordFailure).toHaveBeenCalledWith(
+        'loanDueCheckCron',
+        notificationError,
+        expect.any(Number),
+      );
       expect(mockRecordSuccess).not.toHaveBeenCalled();
     });
 
@@ -171,7 +191,11 @@ describe('loanDueCheckCron (#2028, #2116)', () => {
       // Should have attempted both notifications
       expect(mockCreateNotification).toHaveBeenCalledTimes(2);
       // Should record failure
-      expect(mockRecordFailure).toHaveBeenCalledWith('loanDueCheckCron', expect.any(Error), expect.any(Number));
+      expect(mockRecordFailure).toHaveBeenCalledWith(
+        'loanDueCheckCron',
+        expect.any(Error),
+        expect.any(Number),
+      );
     });
   });
 
@@ -192,7 +216,7 @@ describe('loanDueCheckCron (#2028, #2116)', () => {
       const firstRunPromise = callback();
 
       // Give the first run a moment to set inFlight = true and hit the await
-      await new Promise(resolve => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
 
       // Now immediately try to run again while first is still in flight
       await callback(); // This should return early due to inFlight check
@@ -212,12 +236,16 @@ describe('loanDueCheckCron (#2028, #2116)', () => {
       const callback = capturedCallback!;
 
       // First run
-      mockQuery.mockResolvedValueOnce({ rows: [{ loan_id: 1, address: 'GADDR1', amount: '10000000' }] });
+      mockQuery.mockResolvedValueOnce({
+        rows: [{ loan_id: 1, address: 'GADDR1', amount: '10000000' }],
+      });
       mockCreateNotification.mockResolvedValueOnce(undefined);
       await callback();
 
       // Second run (after first completes)
-      mockQuery.mockResolvedValueOnce({ rows: [{ loan_id: 2, address: 'GADDR2', amount: '20000000' }] });
+      mockQuery.mockResolvedValueOnce({
+        rows: [{ loan_id: 2, address: 'GADDR2', amount: '20000000' }],
+      });
       mockCreateNotification.mockResolvedValueOnce(undefined);
       await callback();
 
@@ -312,7 +340,7 @@ describe('loanDueCheckCron (#2028, #2116)', () => {
       expect(mockCreateNotification).toHaveBeenCalledWith(
         expect.objectContaining({
           message: 'Your repayment for loan #999 of 1000 is due.',
-        })
+        }),
       );
     });
 
@@ -329,7 +357,7 @@ describe('loanDueCheckCron (#2028, #2116)', () => {
       expect(mockCreateNotification).toHaveBeenCalledWith(
         expect.objectContaining({
           message: 'Your repayment for loan #0 of 0 is due.',
-        })
+        }),
       );
     });
   });

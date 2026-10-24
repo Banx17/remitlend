@@ -4,16 +4,16 @@ process.env.PII_KEK_KEY = '0'.repeat(64);
 process.env.PII_KEK_ID = 'test-kek';
 
 describe('encryptUserProfilePii script (#1828, #2115)', () => {
-  let mockQuery: jest.MockedFunction<
+  let mockQuery: jest.Mock<
     (text: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number }>
   >;
-  let mockClosePool: jest.MockedFunction<() => Promise<void>>;
+  let mockClosePool: jest.Mock<() => Promise<void>>;
   let mockStdoutWrite: jest.Mock;
   let mockStderrWrite: jest.Mock;
   let mockExit: jest.Mock<() => never>;
 
   async function runScriptWithMocks(
-    backfillMock: jest.MockedFunction<() => Promise<{ scanned: number; encrypted: number }>>,
+    backfillMock: jest.Mock<() => Promise<{ scanned: number; encrypted: number }>>,
   ): Promise<{
     stdout: string[];
     stderr: string[];
