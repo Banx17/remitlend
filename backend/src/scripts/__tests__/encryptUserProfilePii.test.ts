@@ -12,14 +12,14 @@ describe('encryptUserProfilePii script (#1828, #2115)', () => {
   let mockStderrWrite: jest.Mock;
   let mockExit: jest.Mock<() => never>;
 
-  async function runScriptWithMocks(
+  const runScriptWithMocks = async (
     backfillMock: jest.Mock<() => Promise<{ scanned: number; encrypted: number }>>,
   ): Promise<{
     stdout: string[];
     stderr: string[];
     exitCode: number | null;
     closePoolCalled: boolean;
-  }> {
+  }> => {
     mockQuery = jest.fn();
     mockClosePool = jest.fn().mockResolvedValue(undefined);
     mockStdoutWrite = jest.fn();
@@ -66,7 +66,7 @@ describe('encryptUserProfilePii script (#1828, #2115)', () => {
       exitCode: mockExit.mock.calls[0]?.[0] ?? null,
       closePoolCalled: mockClosePool.mock.calls.length > 0,
     };
-  }
+  };
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -143,7 +143,7 @@ describe('encryptUserProfilePii script (#1828, #2115)', () => {
 
   describe('idempotency / reruns', () => {
     it('can be run multiple times without double-encrypting', async () => {
-      // Each run is a separate process, so we test by calling the function multiple times
+      // Each run is a separate process, so we call the script multiple times
       // We need to reset modules between runs to simulate separate process invocations
       const backfillMock = jest
         .fn()
@@ -178,7 +178,7 @@ describe('encryptUserProfilePii script (#1828, #2115)', () => {
 
   describe('partial failures', () => {
     it('reports partial encryption when some rows fail', async () => {
-      // The backfillUserProfilePii function handles individual row failures internally
+      // backfillUserProfilePii handles individual row failures internally
       // and returns the count of successfully encrypted rows
       const backfillMock = jest.fn().mockResolvedValue({ scanned: 10, encrypted: 8 });
 
