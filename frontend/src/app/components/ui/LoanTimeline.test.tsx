@@ -16,18 +16,18 @@ import type { LoanEvent } from "../../hooks/useApi";
 
 const TX_HASH = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0a1b2";
 
-function makeEvent(overrides: Partial<LoanEvent> = {}): LoanEvent {
+const makeEvent = (overrides: Partial<LoanEvent> = {}): LoanEvent => {
   return {
     type: "LoanRequested",
     amount: "1000",
     timestamp: "2026-08-01T10:00:00.000Z",
     ...overrides,
   };
-}
+};
 
-function items() {
+const items = () => {
   return screen.getAllByRole("listitem");
-}
+};
 
 describe("LoanTimeline", () => {
   afterEach(() => {
