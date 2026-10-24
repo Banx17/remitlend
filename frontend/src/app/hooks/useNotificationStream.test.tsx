@@ -34,7 +34,7 @@ interface MockSse {
 // hook's fetch ReadableStream reader drains one event at a time. When an abort
 // signal is supplied, a pending read rejects with the same AbortError a real
 // fetch body produces, so abort/cleanup behaviour can be asserted.
-function createSseResponse(signal?: AbortSignal): MockSse {
+const createSseResponse = (signal?: AbortSignal): MockSse => {
   const encoder = new TextEncoder();
   const queue: Uint8Array[] = [];
   let queueReader: (() => void) | null = null;
@@ -79,7 +79,7 @@ function createSseResponse(signal?: AbortSignal): MockSse {
   };
 
   return { response, pushEvent };
-}
+};
 
 function Harness() {
   useNotificationStream();
@@ -145,17 +145,17 @@ function mockFetchCleanClose() {
 
 // Lets the async connect() reach its pending reader.read() without using real
 // timers (the suite runs on fake timers).
-async function flushStreamSetup() {
+const flushStreamSetup = async () => {
   await act(async () => {
     await jest.advanceTimersByTimeAsync(0);
   });
-}
+};
 
 /**
  * Installs a fetch mock that builds one abort-aware SSE response per call and
  * records the AbortSignal each subscription was given.
  */
-function mockSSEStreams() {
+const mockSSEStreams = () => {
   const streams: MockSse[] = [];
   const signals: AbortSignal[] = [];
   const fetchMock = jest.fn().mockImplementation((_url: string, init: RequestInit) => {
@@ -167,15 +167,15 @@ function mockSSEStreams() {
   });
   global.fetch = fetchMock as unknown as typeof fetch;
   return { fetchMock, streams, signals };
-}
+};
 
-function seededQueryClient() {
+const seededQueryClient = () => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   queryClient.setQueryData(["notifications", {}], { notifications: [], unreadCount: 0 });
   return queryClient;
-}
+};
 
 function createWrapper(qc?: QueryClient) {
   const queryClient =
