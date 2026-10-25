@@ -236,6 +236,7 @@ jobs:
           npx jest
           src/app/hooks/useLoanStream.test.tsx
           src/app/components/providers/SessionExpiryHandler.test.tsx
+          src/app/stores/__tests__/useGamificationStore.rewardDedup.test.ts
           src/app/utils/csv.test.ts
           --runInBand
         working-directory: frontend
