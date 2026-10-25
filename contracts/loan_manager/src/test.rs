@@ -645,6 +645,44 @@ fn test_reject_pending_loan() {
 }
 
 #[test]
+fn test_unauthorized_approval_emits_no_event_and_keeps_loan_pending() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (manager, nft_client, _pool, _token, _token_admin) = setup_test(&env);
+    let borrower = Address::generate(&env);
+    let history_hash = BytesN::from_array(&env, &[0u8; 32]);
+    nft_client.mint(
+        &borrower,
+        &600,
+        &history_hash,
+        &String::from_str(&env, "ipfs://QmTest"),
+        &create_test_commitment(&env, 1),
+        &None,
+    );
+    let loan_id = manager.request_loan(&borrower, &1_000, &17_280);
+
+    env.mock_auths(&[]);
+    assert!(manager.try_approve_loan(&loan_id).is_err());
+
+    let approval_emitted = env.events().all().iter().any(|(_contract, topics, _data)| {
+        topics
+            .get(0)
+            .map(|t| {
+                let sym = soroban_sdk::Symbol::from_val(&env, &t);
+                sym == soroban_sdk::Symbol::new(&env, "LoanApproved")
+                    || sym == soroban_sdk::symbol_short!("LoanApprv")
+            })
+            .unwrap_or(false)
+    });
+    assert!(
+        !approval_emitted,
+        "unauthorized approval must not emit approval events"
+    );
+    assert_eq!(manager.get_loan(&loan_id).status, LoanStatus::Pending);
+}
+
+#[test]
 fn test_cancel_decrements_borrower_loan_count() {
     let env = Env::default();
     env.mock_all_auths();
@@ -6321,7 +6359,7 @@ fn test_get_loan_status_discriminants_and_not_found() {
     assert_eq!(manager.get_loan_status(&loan_id_repaid), 2);
 
     // Helper to store arbitrary loan status for test coverage of Liquidated, Cancelled, Rejected, Defaulted
-    let mut create_loan_with_status = |id: u32, status: LoanStatus| {
+    let create_loan_with_status = |id: u32, status: LoanStatus| {
         let loan = Loan {
             borrower: borrower.clone(),
             amount: 1000,
