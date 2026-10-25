@@ -234,6 +234,7 @@ jobs:
       - name: Frontend regression tests
         run: >-
           npx jest
+          src/app/hooks/useSSE.reconnect.test.tsx
           src/app/hooks/useLoanStream.test.tsx
           src/app/components/providers/SessionExpiryHandler.test.tsx
           src/app/utils/csv.test.ts
