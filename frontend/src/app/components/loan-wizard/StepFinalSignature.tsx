@@ -21,7 +21,7 @@ import {
   pollTransactionStatus,
   type TransactionErrorDetails,
 } from "../../utils/transactionErrors";
-import type { LoanWizardData } from "./LoanApplicationWizard";
+import { DEFAULT_TERM_LEDGERS, type LoanWizardData } from "./LoanApplicationWizard";
 
 const ANNUAL_RATE_PERCENT = 12;
 
@@ -71,6 +71,7 @@ export function StepFinalSignature({
   const toast = useContractToast();
 
   const principal = Number(data.amount || "0");
+  const termLedgers = data.termDays * DEFAULT_TERM_LEDGERS;
   const estimatedInterest = (principal * ANNUAL_RATE_PERCENT * data.termDays) / (365 * 100);
   const totalRepayment = principal + estimatedInterest;
   const dueDate = addDays(new Date(), data.termDays);
@@ -98,7 +99,7 @@ export function StepFinalSignature({
         const xdr = await buildUnsignedLoanRequestXdr({
           borrower: borrowerAddress,
           amount: principal,
-          term: data.termDays * 17280,
+          term: termLedgers,
           contractId: managerContractId,
           decimals: getAssetDecimals(data.asset),
         });
@@ -114,7 +115,7 @@ export function StepFinalSignature({
     return () => {
       cancelled = true;
     };
-  }, [borrowerAddress, principal]);
+  }, [borrowerAddress, principal, termLedgers]);
 
   useEffect(() => {
     return () => {

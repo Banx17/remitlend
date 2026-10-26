@@ -74,7 +74,11 @@ export async function buildUnsignedLoanRequestXdr({
     .setTimeout(300)
     .build();
 
-  return tx.toXDR();
+  // Soroban invocations must be simulated before signing so the transaction
+  // carries the ledger keys for its footprint and the required resource fees.
+  const prepared = await server.prepareTransaction(tx);
+
+  return prepared.toXDR();
 }
 
 export async function buildUnsignedRepaymentXdr({
@@ -117,5 +121,9 @@ export async function buildUnsignedRepaymentXdr({
     .setTimeout(300)
     .build();
 
-  return tx.toXDR();
+  // Soroban invocations must be simulated before signing so the transaction
+  // carries the ledger keys for its footprint and the required resource fees.
+  const prepared = await server.prepareTransaction(tx);
+
+  return prepared.toXDR();
 }

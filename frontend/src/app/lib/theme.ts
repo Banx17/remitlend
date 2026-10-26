@@ -13,10 +13,14 @@ export function getStoredTheme(): Theme | null {
   if (typeof window === "undefined") {
     return null;
   }
-  const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
-  return storedTheme === "dark" || storedTheme === "light" || storedTheme === "system"
-    ? (storedTheme as Theme)
-    : null;
+  try {
+    const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+    return storedTheme === "dark" || storedTheme === "light" || storedTheme === "system"
+      ? (storedTheme as Theme)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 export function applyTheme(theme: Theme) {

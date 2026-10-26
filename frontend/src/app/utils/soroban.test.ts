@@ -26,12 +26,23 @@ import { NETWORK_PASSPHRASES } from "./networkPassphrase";
 
 const NETWORK_PASSPHRASE = NETWORK_PASSPHRASES.TESTNET;
 
+// prepareTransaction simulates the invocation against Stellar RPC; stub it so
+// unit tests stay offline and get the transaction back unchanged.
+type PrepareTransaction = typeof rpc.Server.prototype.prepareTransaction;
+
+const stubPrepareTransaction = () => {
+  const prepare = ((tx: unknown) => Promise.resolve(tx)) as unknown as PrepareTransaction;
+
+  return jest.spyOn(rpc.Server.prototype, "prepareTransaction").mockImplementation(prepare);
+};
+
 describe("buildUnsignedLoanRequestXdr", () => {
   const borrower = Keypair.random().publicKey();
   const contractId = Keypair.random().publicKey();
 
   beforeEach(() => {
     jest.spyOn(rpc.Server.prototype, "getAccount").mockResolvedValue(new Account(borrower, "100"));
+    stubPrepareTransaction();
   });
 
   afterEach(() => {
@@ -55,6 +66,22 @@ describe("buildUnsignedLoanRequestXdr", () => {
       expect(invokeArgs.functionName().toString()).toBe("request_loan");
       expect(Address.fromScAddress(invokeArgs.contractAddress()).toString()).toBe(contractId);
     }
+  });
+
+  it("simulates the invocation with prepareTransaction before returning the XDR", async () => {
+    const prepareSpy = stubPrepareTransaction();
+
+    const xdrString = await buildUnsignedLoanRequestXdr({
+      borrower,
+      amount: 1000,
+      term: 12,
+      contractId,
+    });
+
+    expect(prepareSpy).toHaveBeenCalledTimes(1);
+    // The transaction handed to the RPC client is the one that gets serialized.
+    expect(prepareSpy.mock.calls[0][0].operations).toHaveLength(1);
+    expect(TransactionBuilder.fromXDR(xdrString, NETWORK_PASSPHRASE)).toBeDefined();
   });
 
   it("orders arguments as [borrower, amount, term]", async () => {
@@ -157,6 +184,7 @@ describe("buildUnsignedRepaymentXdr", () => {
 
   beforeEach(() => {
     jest.spyOn(rpc.Server.prototype, "getAccount").mockResolvedValue(new Account(borrower, "100"));
+    stubPrepareTransaction();
   });
 
   afterEach(() => {
@@ -180,6 +208,22 @@ describe("buildUnsignedRepaymentXdr", () => {
       expect(invokeArgs.functionName().toString()).toBe("repay");
       expect(Address.fromScAddress(invokeArgs.contractAddress()).toString()).toBe(contractId);
     }
+  });
+
+  it("simulates the invocation with prepareTransaction before returning the XDR", async () => {
+    const prepareSpy = stubPrepareTransaction();
+
+    const xdrString = await buildUnsignedRepaymentXdr({
+      borrower,
+      loanId: "42",
+      amount: 1000,
+      contractId,
+    });
+
+    expect(prepareSpy).toHaveBeenCalledTimes(1);
+    // The transaction handed to the RPC client is the one that gets serialized.
+    expect(prepareSpy.mock.calls[0][0].operations).toHaveLength(1);
+    expect(TransactionBuilder.fromXDR(xdrString, NETWORK_PASSPHRASE)).toBeDefined();
   });
 
   it("orders arguments as [borrower, loanId, amount]", async () => {
@@ -316,6 +360,7 @@ describe("buildUnsignedRepaymentXdr network-aware passphrase", () => {
 
   beforeEach(() => {
     jest.spyOn(rpc.Server.prototype, "getAccount").mockResolvedValue(new Account(borrower, "100"));
+    stubPrepareTransaction();
   });
 
   afterEach(() => {
