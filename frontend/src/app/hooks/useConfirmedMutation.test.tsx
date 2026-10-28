@@ -10,11 +10,11 @@ import { renderHook, act } from "@testing-library/react";
 import { useConfirmedMutation } from "./useConfirmedMutation";
 import { useToastStore } from "../stores/useToastStore";
 
-function createDeferred(): {
+const createDeferred = (): {
   promise: Promise<unknown>;
   resolve: (value: unknown) => void;
   reject: (reason: unknown) => void;
-} {
+} => {
   let resolve!: (value: unknown) => void;
   let reject!: (reason: unknown) => void;
   const promise = new Promise<unknown>((res, rej) => {
@@ -22,7 +22,7 @@ function createDeferred(): {
     reject = rej;
   });
   return { promise, resolve, reject };
-}
+};
 
 describe("useConfirmedMutation", () => {
   beforeEach(() => {
