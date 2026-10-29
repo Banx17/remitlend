@@ -13,25 +13,26 @@ process.env.LENDER_WALLETS = LENDER_KEY;
 process.env.ADMIN_WALLETS = ADMIN_KEY;
 
 const mockQuery = jest.fn<(...args: unknown[]) => Promise<{ rows: unknown[]; rowCount: number }>>();
-const mockBuildWithdrawTx = jest.fn<
-  (
-    depositorPublicKey: string,
-    token: string,
-    amount: number,
-    minAssetsOut: number,
-  ) => Promise<{ unsignedTxXdr: string; networkPassphrase: string }>
->();
-const mockBuildEmergencyWithdrawTx = jest.fn<
-  (
-    depositorPublicKey: string,
-    token: string,
-    shares: number,
-    minAssetsOut: number,
-  ) => Promise<{ unsignedTxXdr: string; networkPassphrase: string }>
->();
-const mockSubmitSignedTx = jest.fn<
-  (signedTxXdr: string) => Promise<{ txHash: string; status: string }>
->();
+const mockBuildWithdrawTx =
+  jest.fn<
+    (
+      depositorPublicKey: string,
+      token: string,
+      amount: number,
+      minAssetsOut: number,
+    ) => Promise<{ unsignedTxXdr: string; networkPassphrase: string }>
+  >();
+const mockBuildEmergencyWithdrawTx =
+  jest.fn<
+    (
+      depositorPublicKey: string,
+      token: string,
+      shares: number,
+      minAssetsOut: number,
+    ) => Promise<{ unsignedTxXdr: string; networkPassphrase: string }>
+  >();
+const mockSubmitSignedTx =
+  jest.fn<(signedTxXdr: string) => Promise<{ txHash: string; status: string }>>();
 const mockWithStellarAndDbTransaction = jest.fn(
   async (stellarOperation: () => Promise<unknown>) => ({
     stellarResult: await stellarOperation(),
