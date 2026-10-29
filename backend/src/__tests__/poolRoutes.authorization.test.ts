@@ -73,13 +73,13 @@ app.use(pauseGuard);
 app.use('/api/pool', poolRoutes);
 app.use(errorHandler);
 
-function token(publicKey: string): string {
+const token = (publicKey: string): string => {
   const scopes = publicKey === ADMIN_KEY ? ['admin:all'] : ['read:pool'];
   return jwt.sign({ publicKey, role: 'unused', scopes, jti: 'pool-route-test' }, JWT_SECRET, {
     expiresIn: '1h',
     algorithm: 'HS256',
   });
-}
+};
 
 const lenderToken = token(LENDER_KEY);
 const adminToken = token(ADMIN_KEY);
