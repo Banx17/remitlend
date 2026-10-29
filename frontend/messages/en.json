@@ -81,7 +81,9 @@
     "activity": "Activity",
     "notifications": "Notifications",
     "liquidations": "Liquidations",
-    "adminDisputes": "Disputes"
+    "adminDisputes": "Disputes",
+    "lend": "Lend",
+    "profile": "Profile"
   },
   "Loans": {
     "title": "Loans",
@@ -198,7 +200,12 @@
     "payNowOverdue": "Pay Now (Overdue)",
     "contactSupport": "Contact Support",
     "viewDetails": "View Details",
-    "details": "Details"
+    "details": "Details",
+    "loanNumber": "Loan #{id}",
+    "liquidated": "Liquidated",
+    "liquidatedLabel": "Collateral was liquidated",
+    "repaymentProgress": "Repayment Progress",
+    "repaymentProgressAria": "Repayment progress: {percent}%"
   },
   "AdminDisputes": {
     "eyebrow": "Admin Review",
@@ -303,8 +310,10 @@
     },
     "extension": {
       "title": "Request extension",
-      "extraLedgers": "Additional ledgers",
+      "days": "Extension duration (days)",
       "newDueDate": "New due date",
+      "fee": "Extension fee",
+      "feeDisclosure": "The contract charges 1% of the remaining principal.",
       "submit": "Build, Sign & Submit"
     }
   },

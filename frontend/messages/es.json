@@ -81,7 +81,9 @@
     "activity": "Actividad",
     "notifications": "Notificaciones",
     "liquidations": "Liquidaciones",
-    "adminDisputes": "Disputas"
+    "adminDisputes": "Disputas",
+    "lend": "Prestar",
+    "profile": "Perfil"
   },
   "Loans": {
     "title": "Préstamos",
@@ -198,7 +200,12 @@
     "payNowOverdue": "Pagar ahora (Vencido)",
     "contactSupport": "Contactar soporte",
     "viewDetails": "Ver detalles",
-    "details": "Detalles"
+    "details": "Detalles",
+    "loanNumber": "Préstamo #{id}",
+    "liquidated": "Liquidado",
+    "liquidatedLabel": "La garantía fue liquidada",
+    "repaymentProgress": "Progreso de reembolso",
+    "repaymentProgressAria": "Progreso de reembolso: {percent}%"
   },
   "AdminDisputes": {
     "eyebrow": "Consola admin",
@@ -303,8 +310,10 @@
     },
     "extension": {
       "title": "Solicitar extensión",
-      "extraLedgers": "Ledgers adicionales",
+      "days": "Duración de la extensión (días)",
       "newDueDate": "Nueva fecha de vencimiento",
+      "fee": "Tarifa de extensión",
+      "feeDisclosure": "El contrato cobra el 1 % del capital pendiente.",
       "submit": "Construir, Firmar y Enviar"
     }
   },

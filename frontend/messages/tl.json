@@ -81,7 +81,9 @@
     "activity": "Aktibidad",
     "notifications": "Mga Notification",
     "liquidations": "Mga Liquidasyon",
-    "adminDisputes": "Mga Dispute"
+    "adminDisputes": "Mga Dispute",
+    "lend": "Magpautang",
+    "profile": "Aking Profile"
   },
   "Loans": {
     "title": "Mga Loan",
@@ -198,7 +200,12 @@
     "payNowOverdue": "Bayaran Ngayon (Lintasan)",
     "contactSupport": "Kontakin ang Support",
     "viewDetails": "Tingnan ang Mga Detalye",
-    "details": "Mga Detalye"
+    "details": "Mga Detalye",
+    "loanNumber": "Loan #{id}",
+    "liquidated": "Na-liquidate",
+    "liquidatedLabel": "Na-liquidate ang collateral",
+    "repaymentProgress": "Pag-unlad ng Pagbabayad",
+    "repaymentProgressAria": "Pag-unlad ng Pagbabayad: {percent}%"
   },
   "AdminDisputes": {
     "eyebrow": "Pagsusuri ng Admin",
@@ -303,8 +310,10 @@
     },
     "extension": {
       "title": "Humiling ng extension",
-      "extraLedgers": "Dagdag na ledgers",
+      "days": "Tagal ng extension (araw)",
       "newDueDate": "Bagong due date",
+      "fee": "Bayad sa extension",
+      "feeDisclosure": "Naniningil ang kontrata ng 1% ng natitirang principal.",
       "submit": "I-build, Pirmahan at Isumite"
     }
   },

@@ -4,6 +4,8 @@ import { jest } from '@jest/globals';
 type MockQueryResult = { rows: unknown[]; rowCount?: number };
 
 process.env.JWT_SECRET = 'test-jwt-secret-min-32-chars-long!!';
+process.env.PII_KEK_KEY = '0'.repeat(64);
+process.env.PII_KEK_ID = 'test-kek';
 
 const mockQuery: jest.MockedFunction<
   (text: string, params?: unknown[]) => Promise<MockQueryResult>
@@ -40,6 +42,8 @@ await jest.unstable_mockModule('../services/sorobanService.js', () => ({
 await import('../db/connection.js');
 const { default: app } = await import('../app.js');
 const { generateJwtToken } = await import('../services/authService.js');
+const { notificationService } = await import('../services/notificationService.js');
+const { default: logger } = await import('../utils/logger.js');
 
 const bearer = (publicKey: string) => ({
   Authorization: `Bearer ${generateJwtToken(publicKey)}`,
@@ -148,5 +152,112 @@ describe('notification preferences endpoints', () => {
       });
 
     expect(response.status).toBe(400);
+  });
+});
+
+describe('updateNotificationPreferences upsert', () => {
+  it('upserts into user_profiles so settings persist when no profile row exists', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ email_enabled: true, sms_enabled: false, phone: null }],
+      rowCount: 1,
+    });
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 });
+
+    const result = await notificationService.updateNotificationPreferences('GNEWUSER', {
+      emailEnabled: true,
+      smsEnabled: false,
+      phone: null,
+      perTypeOverrides: {},
+    });
+
+    const [sql, params] = mockQuery.mock.calls[0]!;
+    expect(sql).toMatch(/INSERT INTO user_profiles/);
+    expect(sql).toMatch(/ON CONFLICT \(public_key\) DO UPDATE/);
+    // The phone number is envelope encrypted and the legacy plaintext column
+    // is cleared, so only the KEK id is stored in cleartext (#1828).
+    expect(sql).toMatch(/phone = NULL/);
+    expect(sql).toMatch(/phone_ciphertext/);
+    expect(params?.slice(0, 3)).toEqual(['GNEWUSER', true, false]);
+    expect(params?.slice(3)).toEqual([null, null, null, null]);
+    expect(result.emailEnabled).toBe(true);
+  });
+});
+
+describe('notifyUserExternal per-type overrides', () => {
+  const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
+
+  beforeEach(() => {
+    delete process.env.FROM_EMAIL;
+    jest.spyOn(logger, 'withContext').mockReturnValue(mockLogger as never);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const notificationRow = {
+    id: 1,
+    user_id: 'GUSER',
+    type: 'loan_approved',
+    title: 't',
+    message: 'm',
+    loan_id: null,
+    action_url: null,
+    read: false,
+    status: 'unread',
+    created_at: new Date(),
+  };
+
+  const create = (type: 'loan_approved' | 'repayment_due') =>
+    notificationService.createNotification({
+      userId: 'GUSER',
+      type,
+      title: 't',
+      message: 'm',
+    });
+
+  it('joins user_notification_preferences and skips delivery when the type is opted out', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [notificationRow] });
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        {
+          email: 'a@b.co',
+          phone: null,
+          email_enabled: true,
+          sms_enabled: false,
+          per_type_overrides: { loan_approved: false },
+        },
+      ],
+    });
+
+    await create('loan_approved');
+
+    expect(mockQuery.mock.calls[1]![0]).toMatch(/LEFT JOIN user_notification_preferences/);
+    expect(mockLogger.info).not.toHaveBeenCalledWith(
+      expect.stringContaining('[Email]'),
+      expect.anything(),
+    );
+  });
+
+  it('still delivers types that are not opted out', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [notificationRow] });
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        {
+          email: 'a@b.co',
+          phone: null,
+          email_enabled: true,
+          sms_enabled: false,
+          per_type_overrides: { repayment_due: false },
+        },
+      ],
+    });
+
+    await create('loan_approved');
+
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      expect.stringContaining('[Email]'),
+      expect.anything(),
+    );
   });
 });

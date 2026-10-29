@@ -56,6 +56,7 @@ export const ERROR_CODE_MESSAGES: Record<string, string> = {
   DATABASE_ERROR: "Database error occurred",
   EXTERNAL_SERVICE_ERROR: "External service error occurred",
   BLOCKCHAIN_ERROR: "Blockchain operation failed",
+  SERVICE_UNAVAILABLE: "The service is temporarily unavailable. Please try again later",
   BORROWER_MISMATCH: "Borrower wallet mismatch",
   INSUFFICIENT_BALANCE: "Insufficient account balance",
   LOAN_ALREADY_REPAID: "Loan has already been repaid",
@@ -73,8 +74,11 @@ function toErrorMessage(error: unknown): string {
   if (typeof error === "string") {
     return error;
   }
+  if (error === undefined) {
+    return "Unknown transaction error";
+  }
   try {
-    return JSON.stringify(error);
+    return JSON.stringify(error) ?? "Unknown transaction error";
   } catch {
     return "Unknown transaction error";
   }

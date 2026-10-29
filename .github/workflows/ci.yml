@@ -217,8 +217,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+        working-directory: frontend
       - name: Frontend checks & build
         run: echo "Frontend lint, typecheck, tests, and build passed"
+      # Issue #2119 / #2125 / #2145 / #2146: keep the loan-stream, session-expiry,
+      # CSV-export and PII-masking regression suites green in CI. Scoped to these
+      # files while the rest of the frontend suite is migrated off Vitest-only
+      # test files.
+      - name: Frontend regression tests
+        run: >-
+          npx jest
+          src/app/hooks/useSSE.reconnect.test.tsx
+          src/app/hooks/useLoanStream.test.tsx
+          src/app/components/providers/SessionExpiryHandler.test.tsx
+          src/app/stores/__tests__/useGamificationStore.rewardDedup.test.ts
+          src/app/utils/csv.test.ts
+          src/app/utils/piiMask.test.ts
+          --runInBand
+        working-directory: frontend
 
   scripts-typecheck:
     needs: supply-chain-audit
@@ -276,5 +300,72 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+      # Issue #2152: the governance quorum (signer set + threshold) is the
+      # security boundary for every admin handover, so its tests run on every
+      # change instead of being executed ad hoc by reviewers.
+      - name: Multisig governance quorum tests
+        run: cargo test -p multisig_governance --lib
+        working-directory: contracts
       - name: Contracts check
         run: echo "Contracts format, clippy, tests, and build passed"
+
+  # Issue #2151: the remittance NFT is the borrower's credit identity, so its
+  # authorization gates are security-critical. Every release must carry the
+  # owner's signature as well as an admin/authorized-minter one, and the
+  # one-time remint claim (`approve_remint` + `admin_remint`) must stay
+  # un-replayable. These deterministic tests pin those paths and the NftError
+  # codes they return, so widening a gate or renumbering an error fails CI.
+  contract-authorization:
+    needs: money-policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+      - name: Remittance NFT authorization tests
+        run: cargo test -p remittance_nft --lib
+        working-directory: contracts
+
+  # Issue #1382: the contract, the backend and the frontend must agree on the
+  # loan accrual to the last stroop. This job runs the shared golden vectors
+  # (`contracts/testdata/accrual_vectors.json`) and the randomised drift
+  # checks in all three layers, so a change that moves one layer's numbers
+  # fails the build instead of silently drifting away from the contract.
+  accrual-parity:
+    needs: [supply-chain-audit, money-policy]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+      - name: Contract accrual parity
+        run: |
+          cargo test -p money
+          cargo test -p loan_manager --lib
+        working-directory: contracts
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: backend
+      - name: Backend accrual parity
+        run: node --experimental-vm-modules node_modules/jest/bin/jest.js src/money --forceExit
+        working-directory: backend
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+      - name: Frontend accrual parity
+        run: |
+          node --experimental-vm-modules node_modules/jest/bin/jest.js \
+            lib/money src/app/hooks/useOwedProjection.test.ts --forceExit
+        working-directory: frontend

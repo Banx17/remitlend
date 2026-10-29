@@ -149,7 +149,11 @@ describe("StepFinalSignature on-chain submission (#1811)", () => {
 
     await waitFor(() => {
       expect(buildUnsignedLoanRequestXdr).toHaveBeenCalledWith(
-        expect.objectContaining({ borrower: "GBD_BORROWER", amount: 1000 }),
+        expect.objectContaining({
+          borrower: "GBD_BORROWER",
+          amount: 1000,
+          term: 30 * 17280,
+        }),
       );
     });
   });

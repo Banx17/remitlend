@@ -9,6 +9,8 @@ import { StepFinalSignature } from "./StepFinalSignature";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+export const DEFAULT_TERM_LEDGERS = 17280;
+
 export interface LoanWizardData {
   /** Step 1 */
   amount: string;

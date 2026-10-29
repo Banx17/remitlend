@@ -1,6 +1,8 @@
 import { query } from '../db/connection.js';
 import logger from '../utils/logger.js';
+import { escapeHtml } from '../utils/escapeHtml.js';
 import type { Response } from 'express';
+import { encryptPiiValue, readPiiValue, type UserProfilePiiRow } from './userProfilePii.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -81,38 +83,39 @@ function buildEmailTemplate(
   type: NotificationType,
   message: string,
 ): { subject: string; html: string } {
+  const safeMessage = escapeHtml(message);
   const templates: Record<NotificationType, { subject: string; html: string }> = {
     loan_approved: {
       subject: 'Your loan has been approved — RemitLend',
-      html: `<h2>Loan Approved</h2><p>${message}</p><p>Log in to view your loan details and repayment schedule.</p>`,
+      html: `<h2>Loan Approved</h2><p>${safeMessage}</p><p>Log in to view your loan details and repayment schedule.</p>`,
     },
     repayment_due: {
       subject: 'Repayment reminder — RemitLend',
-      html: `<h2>Repayment Due Soon</h2><p>${message}</p><p>Please ensure funds are available to avoid a default.</p>`,
+      html: `<h2>Repayment Due Soon</h2><p>${safeMessage}</p><p>Please ensure funds are available to avoid a default.</p>`,
     },
     repayment_confirmed: {
       subject: 'Repayment confirmed — RemitLend',
-      html: `<h2>Repayment Confirmed</h2><p>${message}</p><p>Thank you for your payment.</p>`,
+      html: `<h2>Repayment Confirmed</h2><p>${safeMessage}</p><p>Thank you for your payment.</p>`,
     },
     loan_defaulted: {
       subject: 'Loan default notice — RemitLend',
-      html: `<h2>Loan Defaulted</h2><p>${message}</p><p>Contact support immediately if you believe this is an error.</p>`,
+      html: `<h2>Loan Defaulted</h2><p>${safeMessage}</p><p>Contact support immediately if you believe this is an error.</p>`,
     },
     loan_liquidated: {
       subject: 'Your loan has been liquidated — RemitLend',
-      html: `<h2>Loan Liquidated</h2><p>${message}</p><p>Contact support if you have questions about the outcome.</p>`,
+      html: `<h2>Loan Liquidated</h2><p>${safeMessage}</p><p>Contact support if you have questions about the outcome.</p>`,
     },
     score_changed: {
       subject: 'Your credit score has changed — RemitLend',
-      html: `<h2>Credit Score Update</h2><p>${message}</p><p>Log in to see your updated score and history.</p>`,
+      html: `<h2>Credit Score Update</h2><p>${safeMessage}</p><p>Log in to see your updated score and history.</p>`,
     },
     dispute_opened: {
       subject: 'Loan dispute opened — RemitLend',
-      html: `<h2>Loan Dispute Opened</h2><p>${message}</p><p>Log in to review the dispute.</p>`,
+      html: `<h2>Loan Dispute Opened</h2><p>${safeMessage}</p><p>Log in to review the dispute.</p>`,
     },
     dispute_contested: {
       subject: 'Loan default contested — RemitLend',
-      html: `<h2>Loan Default Contested</h2><p>${message}</p><p>Log in to review the borrower's dispute.</p>`,
+      html: `<h2>Loan Default Contested</h2><p>${safeMessage}</p><p>Log in to review the borrower's dispute.</p>`,
     },
   };
 
@@ -139,7 +142,7 @@ async function sendEmail(email: string, message: string, type?: NotificationType
 
   const template = type
     ? buildEmailTemplate(type, message)
-    : { subject: 'Notification from RemitLend', html: `<p>${message}</p>` };
+    : { subject: 'Notification from RemitLend', html: `<p>${escapeHtml(message)}</p>` };
 
   try {
     const sgMail = await import('@sendgrid/mail');
@@ -187,6 +190,7 @@ class NotificationService {
   async getNotificationPreferences(userId: string): Promise<NotificationPreferences> {
     const result = await query(
       `SELECT up.email_enabled, up.sms_enabled, up.phone,
+             up.phone_ciphertext, up.phone_gcm_nonce, up.phone_dek_wrapped, up.phone_dek_kek_id,
              unp.per_type_overrides
        FROM user_profiles up
        LEFT JOIN user_notification_preferences unp
@@ -209,7 +213,12 @@ class NotificationService {
     return {
       emailEnabled: Boolean(row.email_enabled),
       smsEnabled: Boolean(row.sms_enabled),
-      phone: (row.phone as string | null) ?? null,
+      phone: await readPiiValue(row as UserProfilePiiRow, 'phone', {
+        recordId: userId,
+        actor: userId,
+        reason: 'notification preferences read by owner',
+        requestId: 'notification-preferences',
+      }),
       perTypeOverrides: (row.per_type_overrides as Record<string, boolean>) ?? {},
     };
   }
@@ -221,20 +230,44 @@ class NotificationService {
       'emailEnabled' | 'smsEnabled' | 'phone' | 'perTypeOverrides'
     >,
   ): Promise<NotificationPreferences> {
+    // The phone number is PII: it is stored as an envelope encrypted
+    // ciphertext and the legacy plaintext column is cleared (#1828).
+    const phone = payload.phone ? await encryptPiiValue(payload.phone) : null;
+
     const result = await query(
-      `UPDATE user_profiles
-       SET email_enabled = $2,
-           sms_enabled = $3,
-           phone = $4
-       WHERE public_key = $1
-       RETURNING email_enabled, sms_enabled, phone`,
-      [userId, payload.emailEnabled, payload.smsEnabled, payload.phone],
+      `INSERT INTO user_profiles (public_key, email_enabled, sms_enabled, phone,
+                                  phone_ciphertext, phone_gcm_nonce, phone_dek_wrapped, phone_dek_kek_id)
+       VALUES ($1, $2, $3, NULL, $4, $5, $6, $7)
+       ON CONFLICT (public_key) DO UPDATE
+       SET email_enabled = EXCLUDED.email_enabled,
+           sms_enabled = EXCLUDED.sms_enabled,
+           phone = NULL,
+           phone_ciphertext = EXCLUDED.phone_ciphertext,
+           phone_gcm_nonce = EXCLUDED.phone_gcm_nonce,
+           phone_dek_wrapped = EXCLUDED.phone_dek_wrapped,
+           phone_dek_kek_id = EXCLUDED.phone_dek_kek_id,
+           updated_at = current_timestamp
+       RETURNING email_enabled, sms_enabled, phone,
+                 phone_ciphertext, phone_gcm_nonce, phone_dek_wrapped, phone_dek_kek_id`,
+      [
+        userId,
+        payload.emailEnabled,
+        payload.smsEnabled,
+        phone?.ciphertext ?? null,
+        phone?.gcm_nonce ?? null,
+        phone?.dek_wrapped ?? null,
+        phone?.dek_kek_id ?? null,
+      ],
     );
 
     const row = result.rows[0] ?? {
       email_enabled: payload.emailEnabled,
       sms_enabled: payload.smsEnabled,
-      phone: payload.phone,
+      phone: null,
+      phone_ciphertext: phone?.ciphertext ?? null,
+      phone_gcm_nonce: phone?.gcm_nonce ?? null,
+      phone_dek_wrapped: phone?.dek_wrapped ?? null,
+      phone_dek_kek_id: phone?.dek_kek_id ?? null,
     };
 
     const perTypeOverrides = payload.perTypeOverrides ?? {};
@@ -250,7 +283,7 @@ class NotificationService {
     return {
       emailEnabled: Boolean(row.email_enabled),
       smsEnabled: Boolean(row.sms_enabled),
-      phone: (row.phone as string | null) ?? null,
+      phone: payload.phone ?? null,
       perTypeOverrides,
     };
   }
@@ -324,9 +357,12 @@ class NotificationService {
   private async notifyUserExternal(userId: string, message: string, type: NotificationType) {
     try {
       const result = await query(
-        `SELECT email, phone, email_enabled, sms_enabled 
-         FROM user_profiles 
-         WHERE public_key = $1`,
+        `SELECT up.email, up.phone, up.email_enabled, up.sms_enabled, unp.per_type_overrides,
+                up.email_ciphertext, up.email_gcm_nonce, up.email_dek_wrapped, up.email_dek_kek_id,
+                up.phone_ciphertext, up.phone_gcm_nonce, up.phone_dek_wrapped, up.phone_dek_kek_id
+         FROM user_profiles up
+         LEFT JOIN user_notification_preferences unp ON unp.user_id = up.public_key
+         WHERE up.public_key = $1`,
         [userId],
       );
 
@@ -334,16 +370,31 @@ class NotificationService {
 
       const user = result.rows[0];
 
-      if (user.email_enabled && user.email) {
-        await sendEmail(user.email, message, type);
+      const overrides = (user.per_type_overrides as Record<string, boolean> | null) ?? {};
+      if (overrides[type] === false) return;
+
+      // The e-mail address and the phone number are envelope encrypted; they
+      // are decrypted here, which is audited in `pii_access_log` (#1828).
+      const piiContext = {
+        recordId: userId,
+        actor: 'notification-service',
+        reason: `send ${type} notification`,
+        requestId: `notification:${userId}`,
+      };
+
+      const email = await readPiiValue(user as UserProfilePiiRow, 'email', piiContext);
+      const phone = await readPiiValue(user as UserProfilePiiRow, 'phone', piiContext);
+
+      if (user.email_enabled && email) {
+        await sendEmail(email, message, type);
       }
 
       // Trigger SMS for critical events: repayment_due, loan_defaulted, and loan_liquidated
       const smsEnabledForType =
         type === 'repayment_due' || type === 'loan_defaulted' || type === 'loan_liquidated';
 
-      if (user.sms_enabled && user.phone && smsEnabledForType) {
-        await sendSMS(user.phone, message);
+      if (user.sms_enabled && phone && smsEnabledForType) {
+        await sendSMS(phone, message);
       }
     } catch (error) {
       logger.withContext().error('Error sending external notifications', { userId, error });

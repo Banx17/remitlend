@@ -76,6 +76,8 @@ pub enum PoolError {
     MinAssetsNotMet = 13,
     /// The computed share/asset amount for an operation rounded down to zero, so no value would actually move.
     ZeroShares = 14,
+    /// The provider's withdrawal cooldown has not elapsed yet.
+    WithdrawalCooldownActive = 15,
 }
 
 /// Storage keys.
@@ -369,20 +371,26 @@ impl LendingPool {
             .expect("share redeem overflow")
     }
 
-    fn assert_withdrawal_cooldown_elapsed(env: &Env, provider: &Address, token: &Address) {
+    fn assert_withdrawal_cooldown_elapsed(
+        env: &Env,
+        provider: &Address,
+        token: &Address,
+    ) -> Result<(), PoolError> {
         let cooldown = Self::withdrawal_cooldown(env);
         if cooldown == 0 {
-            return;
+            return Ok(());
         }
 
         let Some(deposit_ledger) = Self::read_deposit_timestamp(env, provider, token) else {
-            return;
+            return Ok(());
         };
 
         let current_ledger = env.ledger().sequence();
         if current_ledger < deposit_ledger.saturating_add(cooldown) {
-            panic!("withdrawal_cooldown_active");
+            return Err(PoolError::WithdrawalCooldownActive);
         }
+
+        Ok(())
     }
 
     /// Burn `shares` and transfer the proportional underlying assets to
@@ -923,7 +931,7 @@ impl LendingPool {
     ) -> Result<(), PoolError> {
         provider.require_auth();
         Self::assert_not_paused(&env)?;
-        Self::assert_withdrawal_cooldown_elapsed(&env, &provider, &token);
+        Self::assert_withdrawal_cooldown_elapsed(&env, &provider, &token)?;
         // Discard the returned asset amount: the normal path signals only via
         // the ordinary `Withdraw` event emitted inside `redeem_shares`.
         Self::redeem_shares(&env, &provider, &token, shares, min_assets_out)?;
@@ -1002,19 +1010,33 @@ impl LendingPool {
         let total_outstanding = Self::read_total_outstanding(&env, &token);
 
         // Utilisation: portion of tracked principal/managed assets currently out on loan.
-        let utilization_bps = if total_managed_assets > 0 && total_outstanding > 0 {
-            let numerator = total_outstanding
-                .checked_mul(10_000)
-                .expect("utilisation overflow");
-            let bps = money::round_div(numerator, total_managed_assets, money::RoundingMode::Floor)
-                .expect("utilisation overflow") as u32;
-            core::cmp::min(bps, 10_000)
-        } else if total_deposits > 0
-            && pool_token_balance < total_deposits
-            && total_outstanding == 0
-        {
-            let borrowed = total_deposits - pool_token_balance;
-            ((borrowed * 10_000) / total_deposits) as u32
+        let utilization_bps = if total_deposits > 0 {
+            // Determine borrowed amount: prefer tracked outstanding, fall back to
+            // balance-derived estimate when the loan-manager address is not configured.
+            let borrowed = if total_outstanding > 0 {
+                total_outstanding
+            } else if pool_token_balance < total_deposits {
+                total_deposits - pool_token_balance
+            } else {
+                0
+            };
+
+            if borrowed > 0 {
+                let denominator = if total_managed_assets > 0 {
+                    total_managed_assets
+                } else {
+                    total_deposits
+                };
+                let numerator = borrowed
+                    .checked_mul(10_000)
+                    .expect("utilisation overflow");
+                let bps =
+                    money::round_div(numerator, denominator, money::RoundingMode::Floor)
+                        .expect("utilisation overflow") as u32;
+                core::cmp::min(bps, 10_000)
+            } else {
+                0
+            }
         } else {
             0
         };
@@ -1225,5 +1247,7 @@ impl LendingPool {
     }
 }
 
+#[cfg(test)]
+mod rounding_tests;
 #[cfg(test)]
 mod test;

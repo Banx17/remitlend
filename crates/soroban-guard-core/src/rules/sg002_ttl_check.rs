@@ -19,7 +19,8 @@ impl TtlExtensionRule {
         let mut calls = StorageCalls::default();
         calls.visit_block(&function.block);
 
-        if calls.uses_expiring_storage && !calls.extends_ttl {
+        if (calls.uses_persistent && !calls.extends_persistent_ttl)
+            || (calls.uses_instance && !calls.extends_instance_ttl) {
             let start = function.sig.ident.span().start();
             diagnostics.push(Diagnostic {
                 rule_id: Self::ID,
@@ -76,15 +77,39 @@ fn has_contractimpl_attribute(item_impl: &ItemImpl) -> bool {
 
 #[derive(Default)]
 struct StorageCalls {
-    uses_expiring_storage: bool,
-    extends_ttl: bool,
+    uses_persistent: bool,
+    extends_persistent_ttl: bool,
+    uses_instance: bool,
+    extends_instance_ttl: bool,
 }
 
 impl<'ast> Visit<'ast> for StorageCalls {
     fn visit_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         match call.method.to_string().as_str() {
-            "persistent" | "instance" => self.uses_expiring_storage = true,
-            "extend_ttl" => self.extends_ttl = true,
+            "persistent" => self.uses_persistent = true,
+            "instance" => self.uses_instance = true,
+            "extend_ttl" => {
+                let recv = call.receiver.to_string();
+                let mut matched = false;
+                if recv.contains("persistent") {
+                    self.extends_persistent_ttl = true;
+                    matched = true;
+                }
+                if recv.contains("instance") {
+                    self.extends_instance_ttl = true;
+                    matched = true;
+                }
+                if !matched {
+                    if self.uses_persistent && !self.uses_instance {
+                        self.extends_persistent_ttl = true;
+                    } else if self.uses_instance && !self.uses_persistent {
+                        self.extends_instance_ttl = true;
+                    } else {
+                        self.extends_persistent_ttl = true;
+                        self.extends_instance_ttl = true;
+                    }
+                }
+            }
             _ => {}
         }
         visit::visit_expr_method_call(self, call);

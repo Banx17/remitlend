@@ -1,5 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import type { Request, Response, NextFunction } from 'express';
-import { query } from '../db/connection.js';
+import { query, withTransaction } from '../db/connection.js';
 import { withStellarAndDbTransaction } from '../db/transaction.js';
 import { AppError } from '../errors/AppError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
@@ -12,8 +13,17 @@ import logger from '../utils/logger.js';
 import { cacheService } from '../services/cacheService.js';
 import { notificationService } from '../services/notificationService.js';
 import { invalidateOnRepay, invalidateOnLoanRequest } from '../utils/cacheKeys.js';
-import { roundToCents } from '../money/decimal.js';
-import { parseStroopAmount, remainingPrincipal, accrueInterest } from '../money/loanAccrual.js';
+import { fromStroops, roundToCents, toStroops } from '../money/decimal.js';
+import {
+  parseStroopAmount,
+  remainingPrincipal,
+  accrueWindows,
+  type LoanSettlement,
+} from '../money/loanAccrual.js';
+import {
+  loadAccrueSnapshots,
+  pairSnapshotsWithSettlements,
+} from '../services/accrualIndexService.js';
 
 // ─── Test/Dev Only ────────────────────────────────────────────────────────────
 
@@ -164,25 +174,44 @@ export const contestDefault = asyncHandler(
 
     // Check loan exists and is defaulted
     const loanResult = await query(
-      `SELECT loan_id FROM contract_events WHERE loan_id = $1 AND event_type = 'LoanDefaulted' LIMIT 1`,
+      `SELECT address FROM contract_events WHERE loan_id = $1 AND event_type = 'LoanDefaulted' LIMIT 1`,
       [loanId],
     );
     if (loanResult.rows.length === 0) {
       throw AppError.badRequest('Loan is not defaulted or does not exist');
     }
 
-    // Insert dispute record and return disputeId
-    const disputeResult = await query(
-      `INSERT INTO loan_disputes (loan_id, borrower, reason, status) VALUES ($1, $2, $3, 'open') RETURNING id`,
-      [loanId, borrower, reason],
-    );
+    // Ownership check (BOLA/IDOR): the `address` on the LoanDefaulted event is
+    // the loan's borrower, so only that wallet may contest the default. The
+    // route also runs `requireLoanOwner`; keeping the assertion here makes the
+    // handler safe wherever it is mounted.
+    const loanBorrower = loanResult.rows[0].address as string | undefined;
+    if (loanBorrower !== borrower) {
+      throw AppError.forbidden('You are not the borrower of this loan');
+    }
 
-    // Optionally: update loan status to 'disputed' in your loan status tracking (if applicable)
-    // If you have a loan status table/column, update it here. If only events, you may want to insert a new event:
-    await query(
-      `INSERT INTO contract_events (loan_id, address, event_type, amount, ledger, ledger_closed_at) VALUES ($1, $2, 'LoanDisputed', NULL, NULL, NOW())`,
-      [loanId, borrower],
-    );
+    // The dispute row and its marker event must land together: writing the
+    // dispute first left an orphaned `loan_disputes` row behind when the event
+    // insert failed (#140).
+    //
+    // `contract_events` declares event_id, ledger, tx_hash and contract_id as
+    // NOT NULL, so this synthetic off-chain marker has to supply all of them
+    // (same shape as the admin dispute endpoints).
+    const contractId = process.env.LOAN_MANAGER_CONTRACT_ID || 'offchain_dispute';
+    const disputeRow = await withTransaction(async (client) => {
+      const disputeResult = await client.query(
+        `INSERT INTO loan_disputes (loan_id, borrower, reason, status) VALUES ($1, $2, $3, 'open') RETURNING id`,
+        [loanId, borrower, reason],
+      );
+      const disputeId = disputeResult.rows[0].id as number;
+
+      await client.query(
+        `INSERT INTO contract_events (event_id, loan_id, address, event_type, amount, ledger, ledger_closed_at, tx_hash, contract_id) VALUES ($1, $2, $3, 'LoanDisputed', NULL, 0, NOW(), $4, $5)`,
+        [randomUUID(), loanId, borrower, `dispute:${disputeId}`, contractId],
+      );
+
+      return { disputeId };
+    });
 
     logger.withContext().info('Loan default contested', { loanId, borrower, reason });
 
@@ -196,7 +225,7 @@ export const contestDefault = asyncHandler(
 
     res.json({
       success: true,
-      disputeId: disputeResult.rows[0].id,
+      disputeId: disputeRow.disputeId,
       message: 'Loan default contested. Admins will review your dispute.',
     });
   },
@@ -268,6 +297,10 @@ const buildAmortizationSchedule = (
   for (let i = 1; i <= periodCount; i++) {
     const isLast = i === periodCount;
 
+    // Every owed amount is rounded to the nearest cent (never truncated
+    // towards zero, which would systematically undercharge the borrower -
+    // see #1372). The last period settles the remaining balance so the
+    // schedule always adds up to the rounded totals.
     const principalPortion = isLast
       ? roundToCents(remainingPrincipal)
       : roundToCents(rawPrincipalPortion);
@@ -319,6 +352,62 @@ export const previewLoanAmortizationSchedule = asyncHandler(async (req: Request,
 });
 
 /**
+ * Load the settlements of a set of loans.
+ *
+ * A settlement is a repayment: it closed an accrual window on-chain, so the
+ * interest of that window is charged on the principal that was outstanding
+ * during it. The late fees charged on the loans are loaded alongside them
+ * because a repayment is split across the outstanding principal, the accrued
+ * interest and the accrued late fee.
+ */
+async function loadLoanSettlements(loanIds: number[]): Promise<{
+  settlements: Map<number, LoanSettlement[]>;
+  lateFees: Map<number, bigint>;
+}> {
+  const settlements = new Map<number, LoanSettlement[]>();
+  const lateFees = new Map<number, bigint>();
+  if (loanIds.length === 0) {
+    return { settlements, lateFees };
+  }
+
+  let rows: Record<string, unknown>[];
+  try {
+    const result = await query(
+      `SELECT loan_id, event_type, ledger, amount
+         FROM contract_events
+        WHERE loan_id = ANY($1::int[])
+          AND event_type IN ('LoanRepaid', 'LateFeeCharged')
+        ORDER BY loan_id ASC, ledger ASC, id ASC`,
+      [loanIds],
+    );
+    rows = result.rows as Record<string, unknown>[];
+  } catch (error) {
+    logger.withContext().warn('Failed to load loan settlements', { error });
+    return { settlements, lateFees };
+  }
+
+  for (const row of rows) {
+    const loanId = Number(row.loan_id);
+    if (!Number.isFinite(loanId)) continue;
+    if (row.event_type === 'LateFeeCharged') {
+      lateFees.set(
+        loanId,
+        (lateFees.get(loanId) ?? 0n) + parseStroopAmount(String(row.amount ?? '')),
+      );
+      continue;
+    }
+    const loanSettlements = settlements.get(loanId) ?? [];
+    loanSettlements.push({
+      ledger: Number(row.ledger ?? 0),
+      amountStroops: parseStroopAmount(String(row.amount ?? '')),
+    });
+    settlements.set(loanId, loanSettlements);
+  }
+
+  return { settlements, lateFees };
+}
+
+/**
  * Get active loans for a borrower
  *
  * GET /api/loans/borrower/:borrower
@@ -351,6 +440,7 @@ export const getBorrowerLoans = asyncHandler(async (req: Request, res: Response)
           MAX(CASE WHEN event_type = 'LoanApproved' THEN interest_rate_bps END) as rate_bps,
           MAX(CASE WHEN event_type = 'LoanApproved' THEN term_ledgers END) as term_ledgers,
           SUM(CASE WHEN event_type = 'LoanRepaid' THEN amount::numeric ELSE 0 END) as total_repaid,
+          SUM(CASE WHEN event_type = 'LateFeeCharged' THEN amount::numeric ELSE 0 END) as accrued_late_fee,
           MAX(CASE WHEN event_type = 'LoanDefaulted' THEN 1 ELSE 0 END) as is_defaulted,
           (
             ARRAY_AGG(
@@ -443,18 +533,66 @@ export const getBorrowerLoans = asyncHandler(async (req: Request, res: Response)
   const hasNext = result.rows.length > limit;
   const trimmedRows = hasNext ? result.rows.slice(0, limit) : result.rows;
 
+  // Issue #1382: the borrower's loans are accrued with the same windowed
+  // replay the detail endpoint uses, so both endpoints report the same
+  // interest and owed amount for a loan.
+  const listedLoanIds = trimmedRows.map((row: Record<string, unknown>) => Number(row.loan_id));
+  const { settlements: settlementsByLoan, lateFees: lateFeesByLoan } =
+    await loadLoanSettlements(listedLoanIds);
+  const snapshotsByLoan = await loadAccrueSnapshots(listedLoanIds);
+
   const loans: BorrowerLoan[] = trimmedRows.map((row: Record<string, unknown>) => {
     const isPending = row.status === 'pending_indexing';
+    const loanId = Number(row.loan_id);
+    const loanSettlements = settlementsByLoan.get(loanId) ?? [];
+    const pairedSnapshots = pairSnapshotsWithSettlements(
+      loanSettlements,
+      snapshotsByLoan.get(loanId) ?? [],
+    );
+    const settlements = loanSettlements.map((settlement, index) => {
+      const snapshot = pairedSnapshots[index];
+      return {
+        ...settlement,
+        ...(snapshot
+          ? {
+              bookedInterestStroops: snapshot.interestStroops,
+              residual: snapshot.residual,
+            }
+          : {}),
+      };
+    });
+
+    const accrual = accrueWindows({
+      principalStroops: parseStroopAmount(String(row.principal ?? '0')),
+      interestRateBps: Number(row.effective_rate_bps ?? DEFAULT_INTEREST_RATE_BPS),
+      termLedgers: Number(row.effective_term_ledgers ?? DEFAULT_TERM_LEDGERS),
+      approvedLedger: Number(row.effective_approved_ledger ?? 0),
+      settlements,
+      currentLedger: Number(row.dispute_freeze_ledger ?? currentLedger),
+      lateFeeStroops: lateFeesByLoan.get(loanId) ?? 0n,
+    });
+
+    const accruedInterest = Number(accrual.outstandingInterestStroops);
+    const totalOwed = Number(
+      accrual.remainingPrincipalStroops + accrual.outstandingInterestStroops,
+    );
+    const isDefaulted = row.status === 'defaulted';
+
     return {
-      loanId: Number(row.loan_id),
+      loanId,
       principal: Number.parseFloat((row.principal as string) || '0'),
-      accruedInterest: isPending
-        ? null
-        : Number.parseFloat((row.accrued_interest as string) || '0'),
+      accruedInterest: isPending ? null : accruedInterest,
+      accruedLateFee: Number.parseFloat((row.accrued_late_fee as string) || '0'),
       totalRepaid: Number.parseFloat((row.total_repaid as string) || '0'),
-      totalOwed: isPending ? null : Number.parseFloat((row.total_owed as string) || '0'),
+      totalOwed: isPending ? null : totalOwed,
       nextPaymentDeadline: new Date(row.next_payment_deadline as string).toISOString(),
-      status: row.status as 'active' | 'repaid' | 'defaulted' | 'pending_indexing',
+      status: (isPending
+        ? 'pending_indexing'
+        : isDefaulted
+          ? 'defaulted'
+          : totalOwed > 0.01
+            ? 'active'
+            : 'repaid') as 'active' | 'repaid' | 'defaulted' | 'pending_indexing',
       borrower: row.address as string,
       approvedAt: row.approved_at ? new Date(row.approved_at as string).toISOString() : null,
       ...(typeof row.latest_event_type === 'string'
@@ -584,20 +722,61 @@ export const getLoanDetails = asyncHandler(async (req: Request, res: Response) =
 
   const isPending = approvedLedger <= 0 || currentLedger < approvedLedger;
 
-  const accruedInterestStroops = isPending
-    ? 0n
-    : accrueInterest({
-        remainingPrincipalStroops: remainingPrincipal(principalStroops, totalRepaidStroops),
-        interestRateBps: rateBps,
-        elapsedLedgers,
-        termLedgers,
-      });
+  // Issue #1382: the loan manager settles an accrual window on every
+  // repayment, and the interest of a window is charged on the principal that
+  // was outstanding during it. Replaying the windows reproduces the
+  // contract's own numbers; a single window over the whole term (the
+  // previous behaviour) drifts as soon as a loan is repaid in more than one
+  // instalment.
+  const lateFeeStroops = events
+    .filter((event: Record<string, unknown>) => event.event_type === 'LateFeeCharged')
+    .reduce(
+      (sum: bigint, event: Record<string, unknown>) =>
+        sum + parseStroopAmount(String(event.amount ?? '')),
+      0n,
+    );
+  const repaymentSettlements: LoanSettlement[] = repaymentEvents.map(
+    (event: Record<string, unknown>) => ({
+      ledger: Number(event.ledger ?? 0),
+      amountStroops: parseStroopAmount(String(event.amount ?? '')),
+    }),
+  );
+  const snapshotsByLoan = await loadAccrueSnapshots([Number(loanId)]);
+  const pairedSnapshots = pairSnapshotsWithSettlements(
+    repaymentSettlements,
+    snapshotsByLoan.get(Number(loanId)) ?? [],
+  );
+  const settlements = repaymentSettlements.map((settlement, index) => {
+    const snapshot = pairedSnapshots[index];
+    return {
+      ...settlement,
+      ...(snapshot
+        ? {
+            bookedInterestStroops: snapshot.interestStroops,
+            residual: snapshot.residual,
+          }
+        : {}),
+    };
+  });
+
+  const accrual = accrueWindows({
+    principalStroops,
+    interestRateBps: rateBps,
+    termLedgers,
+    approvedLedger,
+    settlements,
+    currentLedger: freezeLedger ?? currentLedger,
+    lateFeeStroops,
+  });
+  const accruedInterestStroops = isPending ? 0n : accrual.outstandingInterestStroops;
   const accruedInterest = Number(accruedInterestStroops);
   // Issue #1369: Owed amount must add accrued interest to remaining principal (not subtract).
   // remaining principal + interest accrued on it == principal + accrued - totalRepaid
-  const totalOwed = Number(
-    remainingPrincipal(principalStroops, totalRepaidStroops) + accruedInterestStroops,
-  );
+  const remainingPrincipalStroops = isPending
+    ? remainingPrincipal(principalStroops, totalRepaidStroops)
+    : accrual.remainingPrincipalStroops;
+  const totalOwed = Number(remainingPrincipalStroops + accruedInterestStroops);
+  const extensionFeeStroops = (remainingPrincipalStroops * 100n) / 10_000n;
 
   res.json({
     success: true,
@@ -619,6 +798,7 @@ export const getLoanDetails = asyncHandler(async (req: Request, res: Response) =
             : 'repaid',
       requestedAt: requestEvent?.ledger_closed_at,
       approvedAt: approvalEvent?.ledger_closed_at,
+      extensionFee: Number(extensionFeeStroops) / 10_000_000,
       events: events.map((event: Record<string, unknown>) => ({
         type: event.event_type,
         amount: event.amount,
@@ -687,6 +867,9 @@ export const getLoanAmortizationSchedule = asyncHandler(async (req: Request, res
   });
 });
 
+/** Format stroops as a token amount without trailing settlement zeros. */
+const formatTokenAmount = (stroops: bigint): string => fromStroops(stroops).replace(/\.?0+$/, '');
+
 /**
  * POST /api/loans/request
  */
@@ -712,12 +895,18 @@ export const requestLoan = asyncHandler(async (req: Request, res: Response) => {
     typeof (sorobanService as unknown as { getPoolBalance?: () => Promise<number> })
       .getPoolBalance === 'function'
   ) {
-    const poolBalance = await (
+    const poolBalanceStroops = await (
       sorobanService as unknown as { getPoolBalance: () => Promise<number> }
     ).getPoolBalance();
-    if (amount > poolBalance) {
+    // `amount` is a human-readable token amount (e.g. 1000 USDC) while
+    // `getPoolBalance()` returns raw stroops (10^7 per token), so the comparison
+    // has to happen in a single unit — stroops — instead of comparing the two
+    // numbers directly (#139).
+    const requestedStroops = toStroops(amount.toString());
+    const availableStroops = BigInt(Math.floor(poolBalanceStroops));
+    if (requestedStroops > availableStroops) {
       throw AppError.badRequest(
-        'Insufficient pool liquidity to cover this loan',
+        `Insufficient pool liquidity to cover this loan: requested ${amount} tokens, pool holds ${formatTokenAmount(availableStroops)} tokens`,
         ErrorCode.INSUFFICIENT_BALANCE,
       );
     }
@@ -1194,6 +1383,45 @@ export const submitTransaction = asyncHandler(async (req: Request, res: Response
     status: sr.status,
   });
 
+  res.json({
+    success: true,
+    txHash: sr.txHash,
+    status: sr.status,
+    ...(sr.resultXdr ? { resultXdr: sr.resultXdr } : {}),
+  });
+});
+
+export const submitRefinanceTransaction = asyncHandler(async (req: Request, res: Response) => {
+  const borrower = req.user?.publicKey;
+  const loanId = Number.parseInt(req.params.loanId as string, 10);
+  const { signedTxXdr } = req.body as { signedTxXdr: string };
+  if (!borrower) throw AppError.unauthorized('Authentication required');
+  if (!signedTxXdr) {
+    throw AppError.badRequest('signedTxXdr is required', ErrorCode.MISSING_FIELD, 'signedTxXdr');
+  }
+  if (!Number.isSafeInteger(loanId) || loanId <= 0) {
+    throw AppError.badRequest('Invalid loan ID', ErrorCode.INVALID_LOAN_ID, 'loanId');
+  }
+
+  const adminSignedTxXdr = await sorobanService.signRefinanceAuthorization(
+    signedTxXdr,
+    borrower,
+    loanId,
+  );
+  const result = await withStellarAndDbTransaction(
+    async () => sorobanService.submitSignedTx(adminSignedTxXdr),
+    async (stellarResult: unknown, client) => {
+      const sr = stellarResult as { txHash: string; status: string };
+      await client.query(
+        `INSERT INTO transaction_submissions (tx_hash, status, submitted_at, submitted_by)
+           VALUES ($1, $2, NOW(), $3)
+           ON CONFLICT (tx_hash) DO UPDATE SET status = EXCLUDED.status, submitted_at = EXCLUDED.submitted_at`,
+        [sr.txHash, sr.status, borrower],
+      );
+      return { recorded: true };
+    },
+  );
+  const sr = result.stellarResult as { txHash: string; status: string; resultXdr?: string };
   res.json({
     success: true,
     txHash: sr.txHash,

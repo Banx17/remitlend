@@ -272,6 +272,7 @@ export interface BorrowerLoan {
   id: number;
   principal: number;
   accruedInterest: number;
+  accruedLateFee: number;
   totalOwed: number;
   totalRepaid: number;
   nextPaymentDeadline: string;
@@ -300,6 +301,8 @@ export interface LoanDetails {
   approvedAt?: string;
   events: LoanEvent[];
   lateFees?: number;
+  extensionFee?: number;
+  extensionFee?: number;
   collateralLocked?: number;
   collateralRatio?: number;
   healthFactor?: number;
@@ -1788,6 +1791,13 @@ export async function submitLoanTransaction(signedTxXdr: string) {
     method: "POST",
     body: JSON.stringify({ signedTxXdr }),
   });
+}
+
+export async function submitRefinanceLoanTransaction(loanId: string | number, signedTxXdr: string) {
+  return apiFetch<{ success: boolean; txHash: string; status: string }>(
+    `/loans/${loanId}/submit-refinance`,
+    { method: 'POST', body: JSON.stringify({ signedTxXdr }) },
+  );
 }
 
 interface BuildLoanTxResponse {

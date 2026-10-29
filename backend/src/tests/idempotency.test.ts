@@ -66,9 +66,8 @@ describe('Idempotency Middleware', () => {
 
     await idempotencyMiddleware(req as Request, res as Response, next);
 
-    // The request carries no wallet, so the key lives in the `anon` namespace
-    // (#1809) — a bare `idemp:${key}` would be shared by every caller.
-    expect(cacheService.get).toHaveBeenCalledWith(`idemp:${namespacedKey('anon', key)}`);
+    // No user in request -> actor is 'anon'
+    expect(cacheService.get).toHaveBeenCalledWith(`idemp:anon:${key}`);
     expect(res.status).toHaveBeenCalledWith(201);
     expect(res.set).toHaveBeenCalledWith('X-Idempotency-Cache', 'HIT');
     expect(res.json).toHaveBeenCalledWith(cachedResponse.body);
@@ -175,10 +174,10 @@ describe('Idempotency Middleware', () => {
     (res.json as unknown as (b: unknown) => void)({ success: true });
     await finishHandler();
 
-    // Both the lock and the cache key are namespaced by actor (#1809).
-    expect(cacheService.delete).toHaveBeenCalledWith(`idemp:${namespacedKey('anon', key)}:lock`);
+    // No user in request -> actor is 'anon'
+    expect(cacheService.delete).toHaveBeenCalledWith(`idemp:anon:${key}:lock`);
     const setCall = (cacheService.set as jest.Mock).mock.calls[0];
-    expect(setCall[0]).toBe(`idemp:${namespacedKey('anon', key)}`);
+    expect(setCall[0]).toBe(`idemp:anon:${key}`);
     const stored = setCall[1] as { fingerprint: string; body: unknown };
     expect(stored.body).toEqual({ success: true });
     expect(stored.fingerprint).toBe(computeFingerprint(req as Request).fingerprint);
